@@ -1,0 +1,1 @@
+obj-y += mfc_controller.o

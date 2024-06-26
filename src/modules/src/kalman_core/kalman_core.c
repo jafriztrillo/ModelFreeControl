@@ -234,6 +234,8 @@ void kalmanCoreScalarUpdate(kalmanCoreData_t* this, arm_matrix_instance_f32 *Hm,
   ASSERT(Hm->numRows == 1);
   ASSERT(Hm->numCols == KC_STATE_DIM);
 
+
+
   // ====== INNOVATION COVARIANCE ======
 
   mat_trans(Hm, &HTm);

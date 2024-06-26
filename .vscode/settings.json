@@ -5,6 +5,8 @@
         "**/bower_components": true
     },
     "files.associations": {
-        "bootloader.h": "c"
+        "controller_pid.h": "c",
+        "stabilizer_types.h": "c",
+        "usec_time.h": "c"
     }
 }

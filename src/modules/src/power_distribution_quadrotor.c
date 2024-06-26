@@ -115,6 +115,29 @@ static void powerDistributionForceTorque(const control_t *control, motors_thrust
   }
 }
 
+/*
+The MFC Z controller outputs forces in N which needs to be blended with the pwm values outputted from the attitude controller.
+Since the ForceTorque conversion is a linear equation the transformation should be able to be broken up into components and the
+thrust can be converted alone before rejoined with the attitude pwm values.
+*/
+static void powerDistributionForcePWM(const control_t *control, motors_thrust_uncapped_t* motorThrustUncapped) {
+  int16_t r = control->roll / 2.0f;
+  int16_t p = control->pitch / 2.0f;
+  int16_t y = control->yaw;
+  const float thrustPart = 0.25f * control->thrustSi; // N (per rotor)
+  
+  float motor_pwm = (-pwmToThrustB  + sqrtf(pwmToThrustB * pwmToThrustB + 4.0f * pwmToThrustA * thrustPart)) / (2.0f * pwmToThrustA);
+
+  if(motor_pwm < 0.0f)
+  {
+    motor_pwm = 0.0f;
+  }
+  motorThrustUncapped->motors.m1 = motor_pwm * UINT16_MAX - r + p + y;
+  motorThrustUncapped->motors.m2 = motor_pwm * UINT16_MAX - r - p - y;
+  motorThrustUncapped->motors.m3 = motor_pwm * UINT16_MAX + r - p + y;
+  motorThrustUncapped->motors.m4 = motor_pwm  * UINT16_MAX + r - p - y;
+}
+
 static void powerDistributionForce(const control_t *control, motors_thrust_uncapped_t* motorThrustUncapped) {
   // Not implemented yet
 }
@@ -130,6 +153,9 @@ void powerDistribution(const control_t *control, motors_thrust_uncapped_t* motor
       break;
     case controlModeForce:
       powerDistributionForce(control, motorThrustUncapped);
+      break;
+    case controlModeForcePWM:
+      powerDistributionForcePWM(control, motorThrustUncapped);
       break;
     default:
       // Nothing here

@@ -132,6 +132,8 @@ static inline struct vec vbasis(int i) {
 // operators
 //
 
+
+
 // multiply a vector by a scalar.
 static inline struct vec vscl(float s, struct vec v) {
 	return mkvec(s * v.x , s * v.y, s * v.z);
@@ -350,6 +352,24 @@ static inline struct mat33 mdiag(float a, float b, float c) {
 	m.m[0][0] = a;
 	m.m[1][1] = b;
 	m.m[2][2] = c;
+	return m;
+}
+
+// construct matrix A from a 3x1 vector and a 1x3 vector
+static inline struct mat33 mvecmult(struct vec v1, struct vec v2){
+	struct mat33 m;
+	m.m[0][0] = v1.x * v2.x;
+	m.m[0][1] = v1.x * v2.y;
+	m.m[0][2] = v1.x * v2.z;
+
+	m.m[1][0] = v1.y * v2.x;
+	m.m[1][1] = v1.y * v2.y;
+	m.m[1][2] = v1.y * v2.z;
+
+	m.m[2][0] = v1.z * v2.x;
+	m.m[2][1] = v1.z * v2.y;
+	m.m[2][2] = v1.z * v2.z;
+
 	return m;
 }
 // construct the matrix a * I for scalar a.
