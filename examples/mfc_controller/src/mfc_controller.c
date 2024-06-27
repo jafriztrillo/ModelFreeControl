@@ -158,7 +158,7 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
   control->controlMode = controlModeLegacy;
   yd_dot = 0;
   yd_ddot = 0;
-  lpf = 0.33f;
+  lpf = 0.1f;
   //Exactly the Attitude PID controller from Bitcraze
   if (RATE_DO_EXECUTE(ATTITUDE_RATE, stabilizerStep)) {
     // Rate-controled YAW is moving YAW angle setpoint
@@ -199,38 +199,28 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
 
   if(RATE_DO_EXECUTE(CTRL_RATE, stabilizerStep)) {
     if (setpoint->mode.z == modeAbs){
-      // Need a landing procedure for the time being
-      // Controller
-      z_traj = setpoint->position.z;
-      struct mat33 Q = mdiag(0.1f,0.1f,0.1f);
-
-      static struct vec H = {1.0f, 0.0f, 0.0f};   
-      float Harr[3] = {1.0f, 0.0f, 0.0f};
-
-      struct mat33 A = {{{1.0f, DT_POS, DT_POS*DT_POS*0.5f},
-                         {0.0f, 1.0f, DT_POS},
-                         {0.0f, 0.0f, 1.0f}}};
-      struct mat33 I = meye();
-
-      // DEBUG_PRINT("Entered Position\n");
-      //Preclared Vars
-      float HPHR = 0.0025f*0.0025f; //This is from Bitcraze themselves. The actual stdDev is a function but it varies from 0.0025:0.003 between 0m and 1m
-      struct mat33 P_plus_prev = mfc.P;
-
-      // =============== Errors ==================
+      // =============== Internal Controller ==================
       float posError = state->position.z - setpoint->position.z;
-      posErrorLog = posError;
       float velError = state->velocity.z - setpoint->velocity.z;
-      velErrorLog = velError;
-      // ============= Linear Control =============
-      // if (posError < 0.05f && state->position.z < 0.05f){
-      //   posError = 0.0f;
-      // }
       float u_c = kp_z*posError + kd_z*velError;
       u_c = lpf*u_c + (1-lpf)*mfc.prev_vel_error;
       mfc.prev_vel_error = u_c;
 
-      // ============= Estimation o
+      //Some Logs 
+      posErrorLog = posError;
+      velErrorLog = velError;
+      // =============== Estimation of F ===============
+      //Predeclared Constant Matrices
+      struct mat33 Q = mdiag(0.1f,0.1f,0.1f);
+      static struct vec H = {1.0f, 0.0f, 0.0f};   
+      float Harr[3] = {1.0f, 0.0f, 0.0f};
+      struct mat33 A = {{{1.0f, DT_POS, DT_POS*DT_POS*0.5f},
+                         {0.0f, 1.0f, DT_POS},
+                         {0.0f, 0.0f, 1.0f}}};
+      struct mat33 I = meye();
+      float HPHR = 0.0025f*0.0025f; //This is from Bitcraze themselves. The actual stdDev is a function but it varies from 0.0025:0.003 between 0m and 1m
+      struct mat33 P_plus_prev = mfc.P;
+
       // start_time = usecTimestamp();
       //State Prediction
       S[0] = mfc.F.x + mfc.F.y*DT_POS + 0.5f*mfc.F.z*DT_POS*DT_POS + 0.5f*beta_z*DT_POS*DT_POS*mfc.u_mfc;
@@ -262,15 +252,6 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
           S[i] = S[i] + K[i]*F_err;
       }
 
-      //Bound the state estimate of F
-      for (int i =0; i < 3; ++i){
-        if(S[i] > 30.0f){
-          S[i] = 30.0f;
-        } else if(S[i] < -25.0f){
-          S[i] = -25.0f;
-        }
-      }
-
       //Covariance Measurement Update
       struct mat33 KH = mvecmult(Kv,H);
       struct mat33 IKH = msub(I,KH);
@@ -291,14 +272,14 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       }
 
       mfc.P = P_plus;
-
-
       mfc.F.x = S[0];
       mfc.F.y = S[1];
       mfc.F.z = S[2];
       // end_time = usecTimestamp();
 
-      //Controller Calculations
+      //======== Final Controller Calculations ========
+      // Compute Acceleration Reference for yd^(v)
+
       // yd_dot = (setpoint->position.z - mfc.prev_z_ref)/DT_POS;
       // yd_ddot = (yd_dot - mfc.prev_ydot)/DT_POS;
       yd_ddot = setpoint->acceleration.z;
@@ -309,6 +290,7 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       // mfc.prev_z_ref  = setpoint->position.z;
       // yd_ddot = setpoint->acceleration.z;
 
+      // Control Effort to Thrust
       /*
       There was a design decision here to change the original MATLAB code with a double derivitive to use the acceleration setpoint as the property of differential
       flatness gives us the derivitives of our trajectory generation. A weird consequence is the setpoints don't seem to be too smooth which makes the double derivitive
@@ -317,9 +299,8 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       mfc.u_mfc = (yd_ddot - u_c - mfc.F.z)  / beta_z;
       mfc.u_mfc = constrain((yd_ddot - u_c - mfc.F.z)  / beta_z, 0.0f, 3.0f);
       actuatorThrustMFC = (-pwmToThrustB + sqrtf(pwmToThrustB * pwmToThrustB + 4.0f * pwmToThrustA * mfc.u_mfc)) / (2.0f * pwmToThrustA);
-      actuatorThrustMFC = constrain(actuatorThrustMFC,0.0f, 0.9f)*UINT16_MAX;
+      actuatorThrustMFC = constrain(actuatorThrustMFC,0.0f, 0.9f)*UINT16_MAX; //This seems to always saturate, how do we not hit these bounds?
     }
-
   }
   
   if (RATE_DO_EXECUTE(ATTITUDE_RATE, stabilizerStep)) {
