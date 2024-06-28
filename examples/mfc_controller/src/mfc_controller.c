@@ -51,7 +51,7 @@
 //Controller Gains
 const static int CTRL_RATE = 300;
 float kp_z = 31.0f;
-float kd_z = 10.0f;
+float kd_z = 16.0f;
 float beta_z = 37.0f;
 // float u_mfc = 0;
 float S[3] = {0.0f};
@@ -66,10 +66,13 @@ static attitude_t attitudeDesired;
 static attitude_t rateDesired;
 static float actuatorThrust;
 static float actuatorThrustMFC;
-static float z_traj;
-float yd_dot;
-float yd_ddot;
+float yd_dotLog;
+float yd_ddotLog;
 static float lpf;
+static float posErrorLog;
+static float velErrorLog;
+
+//Logging Stuff
 static float cmd_thrust;
 static float cmd_roll;
 static float cmd_pitch;
@@ -78,8 +81,7 @@ static float r_roll;
 static float r_pitch;
 static float r_yaw;
 static float accelz;
-static float posErrorLog;
-static float velErrorLog;
+
 int16_t resetTick;
 uint64_t start_time,end_time;
 
@@ -94,6 +96,8 @@ static struct mfc_Variables mfc = {
   .prev_ydot = 0.0f,
   .prev_yddot = 0.0f,
   .prev_vel_error = 0.0f,
+  .prev_pos_error = 0.0f,
+  .u_c = 0.0f,
 };
 static struct mfc_Variables EmptyStruct ={
   .F.x = 0.0f,
@@ -106,6 +110,8 @@ static struct mfc_Variables EmptyStruct ={
   .prev_ydot = 0.0f,
   .prev_yddot = 0.0f,
   .prev_vel_error = 0.0f,
+  .prev_pos_error = 0.0f,
+  .u_c = 0.0f,
 };
 
 
@@ -156,9 +162,6 @@ bool controllerOutOfTreeTest() {
 
 void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const sensorData_t *sensors, const state_t *state, const stabilizerStep_t stabilizerStep) {
   control->controlMode = controlModeLegacy;
-  yd_dot = 0;
-  yd_ddot = 0;
-  lpf = 0.1f;
   //Exactly the Attitude PID controller from Bitcraze
   if (RATE_DO_EXECUTE(ATTITUDE_RATE, stabilizerStep)) {
     // Rate-controled YAW is moving YAW angle setpoint
@@ -202,13 +205,12 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       // =============== Internal Controller ==================
       float posError = state->position.z - setpoint->position.z;
       float velError = state->velocity.z - setpoint->velocity.z;
-      float u_c = kp_z*posError + kd_z*velError;
-      u_c = lpf*u_c + (1-lpf)*mfc.prev_vel_error;
-      mfc.prev_vel_error = u_c;
-
-      //Some Logs 
+      mfc.u_c = kp_z*posError + kd_z*velError;
+      // u_c = lpf*u_c + (1-lpf)*mfc.prev_u_c;
+      // mfc.prev_u_c = u_c;
       posErrorLog = posError;
       velErrorLog = velError;
+
       // =============== Estimation of F ===============
       //Predeclared Constant Matrices
       struct mat33 Q = mdiag(0.1f,0.1f,0.1f);
@@ -280,14 +282,13 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       //======== Final Controller Calculations ========
       // Compute Acceleration Reference for yd^(v)
 
-      // yd_dot = (setpoint->position.z - mfc.prev_z_ref)/DT_POS;
-      // yd_ddot = (yd_dot - mfc.prev_ydot)/DT_POS;
-      yd_ddot = setpoint->acceleration.z;
+      float yd_dot = (setpoint->position.z - mfc.prev_z_ref)/CTRL_RATE;
+      float yd_ddot = (yd_dot - mfc.prev_ydot)/CTRL_RATE;
       yd_ddot = lpf*yd_ddot + (1.0f-lpf)*mfc.prev_yddot;
 
-      // mfc.prev_ydot = yd_dot;
+      mfc.prev_ydot = yd_dot;
       mfc.prev_yddot = yd_ddot;
-      // mfc.prev_z_ref  = setpoint->position.z;
+      mfc.prev_z_ref  = setpoint->position.z;
       // yd_ddot = setpoint->acceleration.z;
 
       // Control Effort to Thrust
@@ -296,10 +297,13 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       flatness gives us the derivitives of our trajectory generation. A weird consequence is the setpoints don't seem to be too smooth which makes the double derivitive
       zero at some points but otherwise this works well. Need to investigate later
       */
-      mfc.u_mfc = (yd_ddot - u_c - mfc.F.z)  / beta_z;
-      mfc.u_mfc = constrain((yd_ddot - u_c - mfc.F.z)  / beta_z, 0.0f, 3.0f);
-      actuatorThrustMFC = (-pwmToThrustB + sqrtf(pwmToThrustB * pwmToThrustB + 4.0f * pwmToThrustA * mfc.u_mfc)) / (2.0f * pwmToThrustA);
-      actuatorThrustMFC = constrain(actuatorThrustMFC,0.0f, 0.9f)*UINT16_MAX; //This seems to always saturate, how do we not hit these bounds?
+      mfc.u_mfc = (yd_ddot - mfc.u_c - mfc.F.z)  / beta_z;
+      mfc.u_mfc = constrain((yd_ddot - mfc.u_c - mfc.F.z)  / beta_z, 0.0f, 3.0f);
+      if(setpoint->position.z < 0.06f && state->position.z < 0.1f){actuatorThrustMFC = 0; return;}
+      else{
+        actuatorThrustMFC = (-pwmToThrustB + sqrtf(pwmToThrustB * pwmToThrustB + 4.0f * pwmToThrustA * mfc.u_mfc)) / (2.0f * pwmToThrustA);
+        actuatorThrustMFC = constrain(actuatorThrustMFC,0.0f, 0.9f)*UINT16_MAX; //This seems to always saturate, how do we not hit these bounds?
+      }
     }
   }
   
@@ -376,8 +380,10 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
 
 //Logging Parameters
 LOG_GROUP_START(mfcLogs)
-LOG_ADD(LOG_FLOAT, d1, &yd_dot)
-LOG_ADD(LOG_FLOAT, d2, &yd_ddot)
+LOG_ADD(LOG_FLOAT, posError, &posErrorLog)
+LOG_ADD(LOG_FLOAT, velError, &velErrorLog)
+LOG_ADD(LOG_FLOAT, d1, &mfc.prev_ydot)
+LOG_ADD(LOG_FLOAT, d2, &mfc.prev_yddot)
 LOG_ADD(LOG_FLOAT, F1, &mfc.F.x)
 LOG_ADD(LOG_FLOAT, F2, &mfc.F.y)
 LOG_ADD(LOG_FLOAT, F3, &mfc.F.z)
@@ -387,8 +393,7 @@ LOG_ADD(LOG_FLOAT, S3, &S[2])
 LOG_ADD(LOG_FLOAT, u_mfc, &mfc.u_mfc)
 LOG_ADD(LOG_FLOAT, PID_PWM_Thrust, &actuatorThrust)
 LOG_ADD(LOG_FLOAT, u_mfc_PWM, &actuatorThrustMFC)
-LOG_ADD(LOG_FLOAT, u_c, &mfc.prev_vel_error)
-LOG_ADD(LOG_FLOAT,setpoint_z, &z_traj)
+LOG_ADD(LOG_FLOAT, u_c, &mfc.u_c)
 LOG_ADD(LOG_FLOAT, P00, &mfc.P.m[0][0])
 LOG_ADD(LOG_FLOAT, P11, &mfc.P.m[1][1])
 LOG_ADD(LOG_FLOAT, P22, &mfc.P.m[2][2])
@@ -396,12 +401,12 @@ LOG_ADD(LOG_FLOAT, cmd_thrust, &cmd_thrust)
 LOG_ADD(LOG_FLOAT, cmd_roll, &cmd_roll)
 LOG_ADD(LOG_FLOAT, cmd_pitch, &cmd_pitch)
 LOG_ADD(LOG_FLOAT, cmd_yaw, &cmd_yaw)
-LOG_ADD(LOG_FLOAT, posError, &posErrorLog)
-LOG_ADD(LOG_FLOAT, velError, &velErrorLog)
 LOG_GROUP_STOP(mfcLogs)
 
 PARAM_GROUP_START(mfcParams)
 PARAM_ADD(PARAM_FLOAT, beta, &beta_z)
 PARAM_ADD(PARAM_INT16, CTRL_RATE, &CTRL_RATE)
 PARAM_ADD(PARAM_FLOAT, alpha, &lpf)
+PARAM_ADD(PARAM_FLOAT, kp_z, &kp_z)
+PARAM_ADD(PARAM_FLOAT, kd_z, &kd_z)
 PARAM_GROUP_STOP(mfcParams)

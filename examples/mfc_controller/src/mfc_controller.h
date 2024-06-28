@@ -36,7 +36,9 @@ struct mfc_Variables{
     float prev_ydot;
     float prev_yddot;
     float prev_z_ref;
+    float prev_pos_error;
     float prev_vel_error;
+    float u_c;
 };
 
 void controllerOutOfTreeInit();
