@@ -33,12 +33,12 @@
 #include <time.h> 
 #include "usec_time.h"
 
-#define DEBUG_MODULE "MFC_CONTROLLER"
+#define DEBUG_MODULE "MFC_CONTROLLER_POS"
 #include "debug.h"
 // #include "controller.h"
 // #include "controller_pid.h"
 #include "math3d.h"
-#include "mfc_controller.h"
+#include "mfc_controller_pos.h"
 #include "position_controller.h"
 #include "attitude_controller.h"
 #include "log.h"
@@ -85,7 +85,7 @@ static float accelz;
 int16_t resetTick;
 uint64_t start_time,end_time;
 
-static struct mfc_Variables mfc = {
+static struct mfc_Variables_s mfc_z = {
   .F.x = 0.0f,
   .F.y = 0.0f,
   .F.z = -1e-6f,
@@ -99,7 +99,11 @@ static struct mfc_Variables mfc = {
   .prev_pos_error = 0.0f,
   .u_c = 0.0f,
 };
-static struct mfc_Variables EmptyStruct ={
+
+
+
+
+static struct mfc_Variables_s EmptyStruct ={
   .F.x = 0.0f,
   .F.y = 0.0f,
   .F.z = -1e-6f,
@@ -129,8 +133,9 @@ static float capAngle(float angle) {
   return result;
 }
 
+
 void mfcParamReset(){
-  mfc = EmptyStruct;
+  mfc_z = EmptyStruct;
 }
 
 
@@ -158,6 +163,75 @@ bool controllerOutOfTreeTest() {
   pass &= attitudeControllerTest();
 
   return pass;
+}
+
+void linearKF(mfc_Variables_t *mfc, const state_t *state){
+   // =============== Estimation of F ===============
+      //Predeclared Constant Matrices
+      struct mat33 Q = mdiag(0.1f,0.1f,0.1f);
+      static struct vec H = {1.0f, 0.0f, 0.0f};   
+      float Harr[3] = {1.0f, 0.0f, 0.0f};
+      struct mat33 A = {{{1.0f, DT_POS, DT_POS*DT_POS*0.5f},
+                         {0.0f, 1.0f, DT_POS},
+                         {0.0f, 0.0f, 1.0f}}};
+      struct mat33 I = meye();
+      float HPHR = 0.0025f*0.0025f; //This is from Bitcraze themselves. The actual stdDev is a function but it varies from 0.0025:0.003 between 0m and 1m
+      struct mat33 P_plus_prev = mfc->P;
+
+      // start_time = usecTimestamp();
+      //State Prediction
+      S[0] = mfc->F.x + mfc->F.y*DT_POS + 0.5f*mfc->F.z*DT_POS*DT_POS + 0.5f*beta_z*DT_POS*DT_POS*mfc->u_mfc;
+      S[1] = mfc->F.y + mfc->F.z*DT_POS + beta_z*DT_POS*mfc->u_mfc;
+      S[2] = mfc->F.z;
+
+      //Covariance Prediction
+      struct mat33 AT = mtranspose(A);
+      struct mat33 PAT = mmul(P_plus_prev, AT);
+      struct mat33 APAT = mmul(A,PAT);
+      struct mat33 P_minus = madd(APAT,Q);
+
+      struct vec PHT = mvmul(P_minus,H);
+      float PHTarr[3] = {PHT.x, PHT.y, PHT.z};
+
+      //Helper for Scalar Update
+      for(int i = 0; i < 3; i++){
+          HPHR += Harr[i]*PHTarr[i];
+      }
+      float try = 1.0f/HPHR;
+      
+      //Calculate Kalman Gain/Load into Float for Looping
+      struct vec Kv = vscl(try, PHT);
+      float K[3] = {Kv.x, Kv.y, Kv.z};
+      float F_err = state->position.z - S[0];
+
+      //State Measurement Update
+      for(int i = 0; i < 3; i++){
+          S[i] = S[i] + K[i]*F_err;
+      }
+
+      //Covariance Measurement Update
+      struct mat33 KH = mvecmult(Kv,H);
+      struct mat33 IKH = msub(I,KH);
+      struct mat33 P_plus = mmul(IKH,P_minus);
+
+      //Enforce Covariance Boundaries
+      for(int i = 0; i < 3; ++i){
+        for(int j = i; j < 3;++j){
+          float p = 0.5f*P_plus.m[i][j] + 0.5f*P_plus.m[j][i];
+          if(isnan(p) || p > 100.0f){
+            P_plus.m[i][j] = P_plus.m[j][i] = 100.0f;
+          } else if (i==j && p < 1e-6f){
+            P_plus.m[i][j] = P_plus.m[j][i] = 1e-6f;
+          } else {
+            P_plus.m[i][j] = P_plus.m[j][i] = p;
+          }
+        }
+      }
+
+      mfc->P = P_plus;
+      mfc->F.x = S[0];
+      mfc->F.y = S[1];
+      mfc->F.z = S[2];
 }
 
 void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const sensorData_t *sensors, const state_t *state, const stabilizerStep_t stabilizerStep) {
@@ -201,7 +275,9 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
   }
 
   if(RATE_DO_EXECUTE(CTRL_RATE, stabilizerStep)) {
-    if (setpoint->mode.z == modeAbs){
+    if (setpoint->mode.x == modeAbs || setpoint->mode.y == modeAbs || setpoint->mode.z == modeAbs){
+
+      // =============== Z Controller ==================
       // =============== Internal Controller ==================
       float posError = state->position.z - setpoint->position.z;
       float velError = state->velocity.z - setpoint->velocity.z;
@@ -225,9 +301,9 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
 
       // start_time = usecTimestamp();
       //State Prediction
-      S[0] = mfc.F.x + mfc.F.y*DT_POS + 0.5f*mfc.F.z*DT_POS*DT_POS + 0.5f*beta_z*DT_POS*DT_POS*mfc.u_mfc;
-      S[1] = mfc.F.y + mfc.F.z*DT_POS + beta_z*DT_POS*mfc.u_mfc;
-      S[2] = mfc.F.z;
+      S[0] = mfc_z.F.x + mfc.F.y*DT_POS + 0.5f*mfc.F.z*DT_POS*DT_POS + 0.5f*beta_z*DT_POS*DT_POS*mfc.u_mfc;
+      S[1] = mfc_z.F.y + mfc.F.z*DT_POS + beta_z*DT_POS*mfc.u_mfc;
+      S[2] = mfc_z.F.z;
 
       //Covariance Prediction
       struct mat33 AT = mtranspose(A);

@@ -8,6 +8,7 @@
         "controller_pid.h": "c",
         "stabilizer_types.h": "c",
         "usec_time.h": "c",
-        "math3d.h": "c"
+        "math3d.h": "c",
+        "cmath": "c"
     }
 }

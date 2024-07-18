@@ -28,6 +28,7 @@ SOFTWARE.
 #include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 
 #ifdef CMATH3D_ASSERTS
 #include <assert.h>
@@ -1031,3 +1032,528 @@ static inline struct vec vprojectpolytope(struct vec v, float const A[], float c
 
 
 // Overall TODO: lines? segments? planes? axis-aligned boxes? spheres?
+
+//(Beta Optimization to keep same structure)
+// For whoever reads this documentation no this is not a smart way to apporach this problem. However rewriting the structure would be
+// unreadable for the next person who doesn't know C to use the functions
+
+
+// ---------------------------- 4D vectors ------------------------------
+
+struct vec4 {
+	float v[4];
+}; // I changed the structure since all the 7x1/7 compuations are done once on the backend and aren't going to be referenced more than a few times ever
+
+//
+// constructors
+//
+
+// construct a vector from 7 floats.
+static inline struct vec4 mkvec4(float x1, float x2, float x3, float x4) {
+	struct vec4 v;
+	v.v[0] = x1; v.v[1] = x2; v.v[2] = x3; v.v[3] = x4;
+	return v;
+}
+// construct a vector with the same value repeated for x, y, and z.
+static inline struct vec4 vrepeat4(float x) {
+	return mkvec4(x, x, x, x);
+}
+// construct a zero-vector.
+static inline struct vec4 vzero4(void) {
+	return vrepeat4(0.0f);
+}
+
+static inline struct vec4 vscl4(float s, struct vec4 v) {
+	return mkvec4(s * v.v[0] , s * v.v[1], s * v.v[2], s*v.v[3]);
+}
+
+// ---------------------------- 7d vectors ------------------------------
+
+struct vec7 {
+	float v[7];
+}; // I changed the structure since all the 7x1/7 compuations are done once on the backend and aren't going to be referenced more than a few times ever
+
+//
+// constructors
+//
+
+// construct a vector from 7 floats.
+static inline struct vec7 mkvec7(float x1, float x2, float x3, float x4, float x5, float x6, float x7) {
+	struct vec7 v;
+	v.v[0] = x1; v.v[1] = x2; v.v[2] = x3; v.v[3] = x4; v.v[4] = x5; v.v[5] = x6; v.v[6] = x7;
+	return v;
+}
+// construct a vector with the same value repeated for x, y, and z.
+static inline struct vec7 vrepeat7(float x) {
+	return mkvec7(x, x, x, x, x, x, x);
+}
+// construct a zero-vector.
+static inline struct vec7 vzero7(void) {
+	return vrepeat7(0.0f);
+
+}
+
+
+// ---------------------------- 4x4 matrices ------------------------------
+struct mat44{
+	float m[4][4];
+};
+
+// construct the matrix a * I for scalar a.
+static inline struct mat44 meye44() {
+	struct mat44 m;
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 4; ++j) {
+			if(i==j){
+				m.m[i][j] = 1;
+			}
+			else{m.m[i][j] = 0;}
+		}
+	}
+	return m;
+}
+
+static inline struct mat44 mzero44() {
+	struct mat44 m;
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 4; ++j) {
+			m.m[i][j] = 0;
+		}
+	}
+	return m;
+}
+
+// construct a matrix with the given diagonal.
+static inline struct mat44 mdiag44(float a, float b, float c,float d) {
+	struct mat44 m = mzero44();
+	m.m[0][0] = a;
+	m.m[1][1] = b;
+	m.m[2][2] = c;
+	m.m[3][3] = d;
+	return m;
+}
+
+// add two matrices.
+static inline struct mat44 madd44(struct mat44 a, struct mat44 b) {
+	struct mat44 c;
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 4; ++j) {
+			c.m[i][j] = a.m[i][j] + b.m[i][j];
+		}
+	}
+	return c;
+}
+// subtract two matrices.
+static inline struct mat44 msub44(struct mat44 a, struct mat44 b) {
+	struct mat44 c;
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 4; ++j) {
+			c.m[i][j] = a.m[i][j] - b.m[i][j];
+		}
+	}
+	return c;
+}
+
+static inline struct mat44 mmul44(struct mat44 a, struct mat44 b) {
+	struct mat44 ab;
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 4; ++j) {
+			float accum = 0;
+			for (int k = 0; k < 4; ++k) {
+				accum += a.m[i][k] * b.m[k][j];
+			}
+			ab.m[i][j] = accum;
+		}
+	}
+	return ab;
+}
+
+
+// matrix transpose.
+static inline struct mat44 mtranspose44(struct mat44 m) {
+	struct mat44 mt;
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 4; ++j) {
+			mt.m[i][j] = m.m[j][i];
+		}
+	}
+	return mt;
+}
+
+
+// construct matrix A from a 4x1 vector and a 1x4 vector
+static inline struct mat44 mvecmult44(struct vec4 v1, struct vec4 v2){
+	struct mat44 m;
+	m.m[0][0] = v1.v[0] * v2.v[0];
+	m.m[0][1] = v1.v[0] * v2.v[1];
+	m.m[0][2] = v1.v[0] * v2.v[2];
+	m.m[0][3] = v1.v[0] * v2.v[3];
+
+	m.m[1][0] = v1.v[1] * v2.v[0];
+	m.m[1][1] = v1.v[1] * v2.v[1];
+	m.m[1][2] = v1.v[1] * v2.v[2];
+	m.m[1][3] = v1.v[1] * v2.v[3];
+
+	m.m[2][0] = v1.v[2] * v2.v[0];
+	m.m[2][1] = v1.v[2] * v2.v[1];
+	m.m[2][2] = v1.v[2] * v2.v[2];
+	m.m[2][3] = v1.v[2] * v2.v[3];
+
+	m.m[3][0] = v1.v[3] * v2.v[0];
+	m.m[3][1] = v1.v[3] * v2.v[1];
+	m.m[3][2] = v1.v[3] * v2.v[2];
+	m.m[3][3] = v1.v[3] * v2.v[3];
+
+
+	return m;
+}
+
+// multiply a matrix by a vector.
+static inline struct vec4 mvmul44(struct mat44 a, struct vec4 v) {
+	float w = a.m[0][0] * v.v[0] + a.m[0][1] * v.v[1] + a.m[0][2] * v.v[2] + a.m[0][3] * v.v[3];
+	float x = a.m[1][0] * v.v[0] + a.m[1][1] * v.v[1] + a.m[1][2] * v.v[2] + a.m[1][3] * v.v[3];
+	float y = a.m[2][0] * v.v[0] + a.m[2][1] * v.v[1] + a.m[2][2] * v.v[2] + a.m[2][3] * v.v[3];
+	float z = a.m[3][0] * v.v[0] + a.m[3][1] * v.v[1] + a.m[3][2] * v.v[2] + a.m[3][3] * v.v[3];
+	return mkvec4(w, x, y, z);
+}
+
+// multiply a matrix by a scalar.
+static inline struct mat44 mscl44(float s, struct mat44 a) {
+	struct mat44 sa;
+	for (int i = 0; i < 4; ++i) {
+		for (int j = 0; j < 4; ++j) {
+			sa.m[i][j] = s * a.m[i][j];
+		}
+	}
+	return sa;
+}
+
+// LU Decomp Operations
+
+// From Wikipedia https://en.wikipedia.org/wiki/LU_decomposition#C_code_example
+static inline struct mat44 doolittle4(struct mat44 A, int *P){
+	struct mat44 tmp;
+	struct mat44 LU = A;
+	int N = 4;
+	int i, j, k, imax;
+	float maxA, absA;
+	//Take care of pivoting
+	for (i = 0; i < N; i++)
+        P[i] = i; //Unit permutation matrix, P[N] initialized with N
+
+    for (i = 0; i < N; i++) {
+        maxA = 0.0f;
+        imax = i;
+
+        for (k = i; k < N; k++)
+            if ((absA = fabs(A.m[k][i])) > maxA) { 
+                maxA = absA;
+                imax = k;
+            }
+
+        if (imax != i) {
+            //pivoting P
+            j = P[i];
+            P[i] = P[imax];
+            P[imax] = j;
+
+            //pivoting rows of A
+            tmp.m[i][0] = LU.m[i][0];
+            LU.m[i][0] = LU.m[imax][0];
+            LU.m[imax][0] = tmp.m[i][0];
+        }
+
+		// Perform LU Decomp
+		for(i = 0; i <= N; ++i){
+			for (j = i + 1; j < N; j++) {
+				LU.m[j][i] /= LU.m[i][i];
+				for (k = i + 1; k < N; k++){
+					LU.m[j][k] -= LU.m[j][i] * LU.m[i][k];
+				}
+			}
+		}
+	}
+	return LU;
+}
+
+// From Wikipedia https://en.wikipedia.org/wiki/LU_decomposition#C_code_example
+static inline struct mat44 inverse(struct mat44 LU, int *P) {
+	int N = 4;
+	struct mat44 IA;
+    for (int j = 0; j < N; j++) {
+        for (int i = 0; i < N; i++) {
+            IA.m[i][j] = P[i] == j ? 1.0 : 0.0;
+
+            for (int k = 0; k < i; k++)
+                IA.m[i][j] -= LU.m[i][k] * IA.m[k][j];
+        }
+
+        for (int i = N - 1; i >= 0; i--) {
+            for (int k = i + 1; k < N; k++)
+                IA.m[i][j] -= LU.m[i][k] * IA.m[k][j];
+
+            IA.m[i][j] /= LU.m[i][i];
+        }
+    }
+	return IA;
+}
+
+// ---------------------------- 7x7 matrices ------------------------------
+struct mat77 {
+	float m[7][7];
+};
+
+//
+// constructors
+//
+
+// construct a zero matrix.
+static inline struct mat77 mzero77(void) {
+	struct mat77 m;
+	for (int i = 0; i < 7; ++i) {
+		for (int j = 0; j < 7; ++j) {
+			m.m[i][j] = 0;
+		}
+	}
+	return m;
+}
+
+// construct the matrix a * I for scalar a.
+static inline struct mat77 meyescl77(float a) {
+	struct mat77 m;
+	for (int i = 0; i < 7; ++i) {
+		for (int j = 0; j < 7; ++j) {
+			if(i==j){
+				m.m[i][j] = 1*a;
+			}
+			else{m.m[i][j] = 0;}
+		}
+	}
+	return m;
+}
+// construct an identity matrix.
+static inline struct mat77 meye77(void) {
+	return meyescl77(1.0f);
+}
+
+// construct a matrix from sevem column vectors.
+static inline struct mat77 mcolumns77(struct vec7 a, struct vec7 b, struct vec7 c, struct vec7 d,struct vec7 e,struct vec7 f,struct vec7 g) {
+	struct mat77 m;
+	m.m[0][0] = a.v[0];
+	m.m[1][0] = a.v[1];
+	m.m[2][0] = a.v[2];
+	m.m[3][0] = a.v[3];
+	m.m[4][0] = a.v[4];
+	m.m[5][0] = a.v[5];
+	m.m[6][0] = a.v[6];
+
+	m.m[0][1] = b.v[0];
+	m.m[1][1] = b.v[1];
+	m.m[2][1] = b.v[2];
+	m.m[3][1] = b.v[3];
+	m.m[4][1] = b.v[4];
+	m.m[5][1] = b.v[5];
+	m.m[6][1] = b.v[6];
+
+	m.m[0][2] = c.v[0];
+	m.m[1][2] = c.v[1];
+	m.m[2][2] = c.v[2];
+	m.m[3][2] = c.v[3];
+	m.m[4][2] = c.v[4];
+	m.m[5][2] = c.v[5];
+	m.m[6][2] = c.v[6];
+
+	m.m[0][3] = d.v[0];
+	m.m[1][3] = d.v[1];
+	m.m[2][3] = d.v[2];
+	m.m[3][3] = d.v[3];
+	m.m[4][3] = d.v[4];
+	m.m[5][3] = d.v[5];
+	m.m[6][3] = d.v[6];
+
+	m.m[0][4] = e.v[0];
+	m.m[1][4] = e.v[1];
+	m.m[2][4] = e.v[2];
+	m.m[3][4] = e.v[3];
+	m.m[4][4] = e.v[4];
+	m.m[5][4] = e.v[5];
+	m.m[6][4] = e.v[6];
+
+	m.m[0][5] = f.v[0];
+	m.m[1][5] = f.v[1];
+	m.m[2][5] = f.v[2];
+	m.m[3][5] = f.v[3];
+	m.m[4][5] = f.v[4];
+	m.m[5][5] = f.v[5];
+	m.m[6][5] = f.v[6];
+
+	m.m[0][6] = g.v[0];
+	m.m[1][6] = g.v[1];
+	m.m[2][6] = g.v[2];
+	m.m[3][6] = g.v[3];
+	m.m[4][6] = g.v[4];
+	m.m[5][6] = g.v[5];
+	m.m[6][6] = g.v[6];
+	return m;
+}
+
+//
+// accessors
+//
+
+// return one column of a matrix as a vector.
+static inline struct vec7 mcolumn77(struct mat77 m, int col) {
+	return mkvec7(m.m[0][col], m.m[1][col], m.m[2][col],m.m[3][col], m.m[4][col], m.m[5][col],m.m[6][col]);
+}
+// return one row of a matrix as a vector.
+static inline struct vec7 mrow7(struct mat77 m, int row) {
+	return mkvec7(m.m[row][0], m.m[row][1], m.m[row][2],m.m[row][3], m.m[row][4], m.m[row][5],m.m[row][6]);
+}
+
+//
+// operators
+//
+
+// matrix transpose.
+static inline struct mat77 mtranspose77(struct mat77 m) {
+	struct mat77 mt;
+	for (int i = 0; i < 7; ++i) {
+		for (int j = 0; j < 7; ++j) {
+			mt.m[i][j] = m.m[j][i];
+		}
+	}
+	return mt;
+}
+// multiply a matrix by a scalar.
+static inline struct mat77 mscl77(float s, struct mat77 a) {
+	struct mat77 sa;
+	for (int i = 0; i < 7; ++i) {
+		for (int j = 0; j < 7; ++j) {
+			sa.m[i][j] = s * a.m[i][j];
+		}
+	}
+	return sa;
+}
+// negate a matrix.
+static inline struct mat77 mneg77(struct mat77 a) {
+	return mscl77(-1.0, a);
+}
+// add two matrices.
+static inline struct mat77 madd77(struct mat77 a, struct mat77 b) {
+	struct mat77 c;
+	for (int i = 0; i < 7; ++i) {
+		for (int j = 0; j < 7; ++j) {
+			c.m[i][j] = a.m[i][j] + b.m[i][j];
+		}
+	}
+	return c;
+}
+// subtract two matrices.
+static inline struct mat77 msub77(struct mat77 a, struct mat77 b) {
+	struct mat77 c;
+	for (int i = 0; i < 7; ++i) {
+		for (int j = 0; j < 7; ++j) {
+			c.m[i][j] = a.m[i][j] - b.m[i][j];
+		}
+	}
+	return c;
+}
+// // multiply a matrix by a vector.
+// static inline struct vec mvmul(struct mat33 a, struct vec v) {
+// 	float x = a.m[0][0] * v.x + a.m[0][1] * v.y + a.m[0][2] * v.z;
+// 	float y = a.m[1][0] * v.x + a.m[1][1] * v.y + a.m[1][2] * v.z;
+// 	float z = a.m[2][0] * v.x + a.m[2][1] * v.y + a.m[2][2] * v.z;
+// 	return mkvec(x, y, z);
+// }
+
+// multiply two matrices.
+static inline struct mat77 mmul77(struct mat77 a, struct mat77 b) {
+	struct mat77 ab;
+	for (int i = 0; i < 7; ++i) {
+		for (int j = 0; j < 7; ++j) {
+			float accum = 0;
+			for (int k = 0; k < 7; ++k) {
+				accum += a.m[i][k] * b.m[k][j];
+			}
+			ab.m[i][j] = accum;
+		}
+	}
+	return ab;
+}
+
+// static inline struct mat77 inv(struct mat77 a){
+// 	struct mat77 LU = doolittle(a);
+// 	struct mat77 I = meye77();
+// 	LU = linearSolve(LU, I);
+// 	return LU;
+// }
+
+// From Wikipedia https://en.wikipedia.org/wiki/LU_decomposition#C_code_example
+static inline struct vec7 linearSolve(struct mat77 LU, struct vec7 b, int *P){
+	struct vec7 x;
+	int n = 7;
+	for (int i = 0; i < n; i++) {
+			x.v[i] = b.v[P[i]];
+			for (int k = 0; k < i; k++){
+				x.v[i] -= LU.m[i][k] * x.v[k];
+			}
+	}
+
+	for (int i = n - 1; i >= 0; i--) {
+		for (int k = i + 1; k < n; k++){
+			x.v[i] -= LU.m[i][k] * x.v[k];
+		}
+		x.v[i] /= LU.m[i][i];
+	}
+	return x;
+}
+
+// From Wikipedia https://en.wikipedia.org/wiki/LU_decomposition#C_code_example
+static inline struct mat77 doolittle(struct mat77 A, int *P){
+	struct mat77 tmp;
+	struct mat77 LU = A;
+	int N = 7;
+	int i, j, k;
+	int imax;
+	float maxA, absA;
+	//Take care of pivoting
+	for (i = 0; i < N; i++)
+        P[i] = i; //Unit permutation matrix, P[N] initialized with N
+
+    for (i = 0; i < N; i++) {
+        maxA = 0.0f;
+        imax = i;
+
+        for (k = i; k < N; k++)
+            if ((absA = fabs(LU.m[k][i])) > maxA) { 
+                maxA = absA;
+                imax = k;
+            }
+
+        if (imax != i) {
+            //pivoting P
+            j = P[i];
+            P[i] = P[imax];
+            P[imax] = j;
+
+            //pivoting rows of A
+            tmp.m[i][0] = LU.m[i][0];
+            LU.m[i][0] = LU.m[imax][0];
+            LU.m[imax][0] = tmp.m[i][0];
+        }
+
+		// Perform LU Decomp
+		for(i = 0; i <= N; i++){
+			for (j = i + 1; j < N; j++) {
+				LU.m[j][i] /= LU.m[i][i];
+				for (k = i + 1; k < N; k++){
+					LU.m[j][k] -= LU.m[j][i] * LU.m[i][k];
+				}
+			}
+		}
+	}
+	return LU;
+}
+
+
+
