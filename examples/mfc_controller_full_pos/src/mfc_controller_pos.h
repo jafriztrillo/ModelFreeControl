@@ -40,6 +40,10 @@ typedef struct mfc_Variables_s{
     float prev_vel_error;
     float u_c;
     float prev_u_c;
+    float kp;
+    float kd;
+    float beta;
+    int flag;
 }mfc_Variables_t;
 
 void linearKF(mfc_Variables_t *mfc, const state_t *state);

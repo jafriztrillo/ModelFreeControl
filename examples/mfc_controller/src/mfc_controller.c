@@ -295,6 +295,7 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       // mfc.prev_ydot = yd_dot;
       // mfc.prev_yddot = yd_ddot;
       // mfc.prev_z_ref  = setpoint->position.z;
+      yd_ddotLog = yd_ddot;
     
       // Control Effort to Thrust
       /*
@@ -388,7 +389,7 @@ LOG_GROUP_START(mfcLogs)
 LOG_ADD(LOG_FLOAT, posError, &posErrorLog)
 LOG_ADD(LOG_FLOAT, velError, &velErrorLog)
 LOG_ADD(LOG_FLOAT, d1, &mfc.prev_ydot)
-LOG_ADD(LOG_FLOAT, d2, &mfc.prev_yddot)
+LOG_ADD(LOG_FLOAT, d2, &yd_ddotLog)
 LOG_ADD(LOG_FLOAT, F1, &mfc.F.x)
 LOG_ADD(LOG_FLOAT, F2, &mfc.F.y)
 LOG_ADD(LOG_FLOAT, F3, &mfc.F.z)

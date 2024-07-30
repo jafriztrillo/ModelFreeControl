@@ -57,6 +57,12 @@ struct this_s {
   uint16_t thrustMin;  // Minimum thrust value to output
 };
 
+// Logs added after
+float rollDLog;
+float pitchDLog;
+static float rVX;
+static float rVY;
+
 // Maximum roll/pitch angle permited
 static float rLimit = PID_VEL_ROLL_MAX;
 static float pLimit = PID_VEL_PITCH_MAX;
@@ -218,11 +224,13 @@ void positionController(float* thrust, attitude_t *attitude, const setpoint_t *s
   setpoint_velocity.z = setpoint->velocity.z;
   if (setpoint->mode.x == modeAbs) {
     setpoint_velocity.x = runPid(state_body_x, &this.pidX, setp_body_x, DT);
+    rVX = setpoint_velocity.x;
   } else if (!setpoint->velocity_body) {
     setpoint_velocity.x = globalvx * cosyaw + globalvy * sinyaw;
   }
   if (setpoint->mode.y == modeAbs) {
     setpoint_velocity.y = runPid(state_body_y, &this.pidY, setp_body_y, DT);
+    rVY = setpoint_velocity.y;
   } else if (!setpoint->velocity_body) {
     setpoint_velocity.y = globalvy * cosyaw - globalvx * sinyaw;
   }
@@ -250,6 +258,9 @@ void velocityController(float* thrust, attitude_t *attitude, const Axis3f* setpo
   // Roll and Pitch
   attitude->pitch = -runPid(state_body_vx, &this.pidVX, setpoint_velocity->x, DT);
   attitude->roll = -runPid(state_body_vy, &this.pidVY, setpoint_velocity->y, DT);
+
+  rollDLog = attitude->roll;
+  pitchDLog = attitude->pitch;
 
   attitude->roll  = constrain(attitude->roll,  -rLimit, rLimit);
   attitude->pitch = constrain(attitude->pitch, -pLimit, pLimit);
@@ -349,6 +360,15 @@ LOG_ADD(LOG_FLOAT, bodyX, &state_body_x)
  *
  */
 LOG_ADD(LOG_FLOAT, bodyY, &state_body_y)
+/**
+ * @brief PID setpoint velocity vx [m/s]
+ */
+LOG_ADD(LOG_FLOAT, rVX, &rVX)
+
+/**
+ * @brief PID setpoint velocity vy [m/s]
+ */
+LOG_ADD(LOG_FLOAT, rVY, &rVY)
 
 /**
  * @brief PID proportional output position x
@@ -451,6 +471,14 @@ LOG_ADD(LOG_FLOAT, VZd, &this.pidVZ.pid.outD)
  * @brief PID feedforward output velocity z
  */
 LOG_ADD(LOG_FLOAT, VZff, &this.pidVZ.pid.outFF)
+/**
+ * @brief Desired Roll
+ */
+LOG_ADD(LOG_FLOAT, rollD, &rollDLog)
+/**
+ * @brief Desired Pitch
+ */
+LOG_ADD(LOG_FLOAT, pitchD, &pitchDLog)
 
 LOG_GROUP_STOP(posCtl)
 
