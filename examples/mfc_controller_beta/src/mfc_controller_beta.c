@@ -51,29 +51,24 @@
 
 
 //Controller Gains
-const static int CTRL_RATE = 360;
-float kp_z = 31.0f;
-float kd_z = 16.0f;
-float beta_z = 57.0f;
+const static int CTRL_RATE = 200;
 float w3 = 5.0f;
 float w4 = 50.0f;
 // float u_mfc = 0;
-float S[4] = {0.0f};
 float ATTITUDE_UPDATE_DT = (float)(1.0f/ATTITUDE_RATE);
 float DT_POS = (float)(1.0f/CTRL_RATE);
 float state_body_x, state_body_y, state_body_vx, state_body_vy;
 static float pwmToThrustA = 0.091492681f;
 static float pwmToThrustB = 0.067673604f;
-static int gainFlag = 0;
 
 
 static attitude_t attitudeDesired;
 static attitude_t rateDesired;
 static float actuatorThrust;
-static float actuatorThrustPID;
+static float actuatorThrustMFC;
 float yd_dotLog;
 float yd_ddotLog;
-static float lpf = 0.13f;
+static float lpf;
 static float posErrorLog;
 static float velErrorLog;
 
@@ -90,27 +85,36 @@ static float accelz;
 int16_t resetTick;
 uint64_t start_time,end_time;
 
-static struct mfc_Variables mfc = {
-  .F.v[0] = 0.0f,
-  .F.v[1] = 0.0f,
-  .F.v[2] = -10.0f,
-  .F.v[3] = 57.0f,
+mfc_Variables_t mfc = {
+  .F.x = 0.0f,
+  .F.y = 0.0f,
+  .F.z = -1e-6f,
   .P.m[0][0] = 1e-6f,
   .P.m[1][1] = 1e-6f,
   .P.m[2][2] = 1e-6f,
-  .P.m[3][3] = 1e-6f,
   .u_mfc = 0.0f,
   .prev_ydot = 0.0f,
   .prev_yddot = 0.0f,
   .prev_vel_error = 0.0f,
   .prev_pos_error = 0.0f,
   .u_c = 0.0f,
-  .F_z_min = -10.0f,
-  .beta_min = 47.0f,
-  .F_z_min_prev =  -10.0f,
-  .beta_min_prev = 47.0f,
+  .kp = 38.0f,
+  .kd = 11.0f,
+  .beta = 55.0f,
+  .flag = 3,
 };
 
+void MFCControllerReset(mfc_Variables_t* mfc){
+  mfc->F.x = 0.0f;
+  mfc->F.y = 0.0f;
+  mfc->F.z = 0.0f;
+  mfc->u_c = 0.0f;
+  mfc->u_mfc = 0.0f;
+}
+
+void positionControllerResetAllParams(){
+  MFCControllerReset(&mfc);
+}
 
 static float capAngle(float angle) {
   float result = angle;
@@ -130,9 +134,8 @@ void appMain() {
   DEBUG_PRINT("Waiting for activation ...\n");
 
   while(1) {
-    vTaskDelay(M2T(2000));
-    // DEBUG_PRINT("Hello World!\n");
-  }
+    vTaskDelay(M2T(2000)); 
+    }
 }
 
 
@@ -142,8 +145,6 @@ void controllerOutOfTreeInit() {
   // controllerPidInit();
   attitudeControllerInit(ATTITUDE_UPDATE_DT);
   positionControllerInit();
-  // mfc.F.v[3] = beta_z;
-  // mfc.beta_min = beta_z;
 }
 
 bool controllerOutOfTreeTest() {
@@ -190,12 +191,8 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
   // This will enforce the controller to only update at 100Hz
   if (RATE_DO_EXECUTE(POSITION_RATE,stabilizerStep)){
     //XY
-    positionController(&actuatorThrustPID, &attitudeDesired, setpoint, state);
-    if(gainFlag == 0){
-      actuatorThrust = actuatorThrustPID;
-      mfc.u_mfc = (powf(((actuatorThrust / UINT16_MAX) * 2.0f * pwmToThrustA + pwmToThrustB),2) - pwmToThrustB*pwmToThrustB) / (4.0f * pwmToThrustA);
-      if(state->position.z > 0.85f){gainFlag = 1;}
-    }
+    positionController(&actuatorThrust, &attitudeDesired, setpoint, state);
+    actuatorThrust = 0.0f;
   }
   // Controller Scheduler (Run this once F has stabilzed)
   if(RATE_DO_EXECUTE(CTRL_RATE, stabilizerStep)) {
@@ -204,80 +201,80 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       // =============== Internal Controller ==================
       float posError = state->position.z - setpoint->position.z;
       float velError = state->velocity.z - setpoint->velocity.z;
-      mfc.u_c = kp_z*posError + kd_z*velError;
-      mfc.u_c = lpf*mfc.u_c + (1-lpf)*mfc.prev_u_c;
-      mfc.prev_u_c = mfc.u_c;
+      mfc.u_c = mfc.kp*posError + mfc.kd*velError;
+      // mfc.u_c = lpf*mfc.u_c + (1-lpf)*mfc.prev_u_c;
+      // mfc.prev_u_c = mfc.u_c;
       posErrorLog = posError;
       velErrorLog = velError;
 
       // =============== Estimation of F ===============
-      //Predeclared Constant Matrices
-      struct mat44 Q = mdiag44(0.1f, 0.1f, 0.1f, 0.1f);
-      struct vec4 H = mkvec4(1.0f, 0.0f, 0.0f, 0.0f);   
-      float Harr[4] = {1.0f, 0.0f, 0.0f,0.0f};
-      struct mat44 A =  {{{1.0f, DT_POS, DT_POS*DT_POS*0.5f, mfc.u_mfc*DT_POS*DT_POS*0.5f},
-                          {0.0f, 1.0f, DT_POS, DT_POS*mfc.u_mfc},
-                          {0.0f, 0.0f, 1.0f, 0.0f},
-                          {0.0f, 0.0f, 0.0f, 1.0f}}};
-      struct mat44 I = meye44();
-      float HPHR = 0.0025f*0.0025f; //This is from Bitcraze themselves. The actual stdDev is a function but it varies from 0.0025:0.003 between 0m and 1m
-      struct mat44 P_plus_prev = mfc.P;
+      // //Predeclared Constant Matrices
+      // struct mat44 Q = mdiag44(0.1f, 0.1f, 0.1f, 0.1f);
+      // struct vec4 H = mkvec4(1.0f, 0.0f, 0.0f, 0.0f);   
+      // float Harr[4] = {1.0f, 0.0f, 0.0f,0.0f};
+      // struct mat44 A =  {{{1.0f, DT_POS, DT_POS*DT_POS*0.5f, mfc.u_mfc*DT_POS*DT_POS*0.5f},
+      //                     {0.0f, 1.0f, DT_POS, DT_POS*mfc.u_mfc},
+      //                     {0.0f, 0.0f, 1.0f, 0.0f},
+      //                     {0.0f, 0.0f, 0.0f, 1.0f}}};
+      // struct mat44 I = meye44();
+      // float HPHR = 0.0025f*0.0025f; //This is from Bitcraze themselves. The actual stdDev is a function but it varies from 0.0025:0.003 between 0m and 1m
+      // struct mat44 P_plus_prev = mfc.P;
 
-      //State Prediction
-      S[0] = mfc.F.v[0] + mfc.F.v[1]*DT_POS + 0.5f*mfc.F.v[2]*DT_POS*DT_POS + 0.5f*mfc.F.v[3]*DT_POS*DT_POS*mfc.u_mfc;
-      S[1] = mfc.F.v[1] + mfc.F.v[2]*DT_POS + mfc.F.v[3]*DT_POS*mfc.u_mfc;
-      S[2] = mfc.F.v[2];
-      S[3] = mfc.F.v[3];
+      // //State Prediction
+      // S[0] = mfc.F.v[0] + mfc.F.v[1]*DT_POS + 0.5f*mfc.F.v[2]*DT_POS*DT_POS + 0.5f*mfc.F.v[3]*DT_POS*DT_POS*mfc.u_mfc;
+      // S[1] = mfc.F.v[1] + mfc.F.v[2]*DT_POS + mfc.F.v[3]*DT_POS*mfc.u_mfc;
+      // S[2] = mfc.F.v[2];
+      // S[3] = mfc.F.v[3];
 
-      //Covariance Prediction
-      struct mat44 AT = mtranspose44(A);
-      struct mat44 PAT = mmul44(P_plus_prev, AT);
-      struct mat44 APAT = mmul44(A,PAT);
-      struct mat44 P_minus = madd44(APAT,Q);
+      // //Covariance Prediction
+      // struct mat44 AT = mtranspose44(A);
+      // struct mat44 PAT = mmul44(P_plus_prev, AT);
+      // struct mat44 APAT = mmul44(A,PAT);
+      // struct mat44 P_minus = madd44(APAT,Q);
 
-      struct vec4 PHT = mvmul44(P_minus,H);
-      float PHTarr[4] = {PHT.v[0], PHT.v[1], PHT.v[2], PHT.v[3]};
+      // struct vec4 PHT = mvmul44(P_minus,H);
+      // float PHTarr[4] = {PHT.v[0], PHT.v[1], PHT.v[2], PHT.v[3]};
 
-      //Helper for Scalar Update
-      for(int i = 0; i < 4; i++){
-          HPHR += Harr[i]*PHTarr[i];
-      }
-      float try = 1.0f/HPHR;
+      // //Helper for Scalar Update
+      // for(int i = 0; i < 4; i++){
+      //     HPHR += Harr[i]*PHTarr[i];
+      // }
+      // float try = 1.0f/HPHR;
       
-      //Calculate Kalman Gain/Load into Float for Looping
-      struct vec4 Kv = vscl4(try, PHT);
-      float K[4] = {Kv.v[0], Kv.v[1], Kv.v[2], Kv.v[3]};
-      float F_err = state->position.z - S[0];
+      // //Calculate Kalman Gain/Load into Float for Looping
+      // struct vec4 Kv = vscl4(try, PHT);
+      // float K[4] = {Kv.v[0], Kv.v[1], Kv.v[2], Kv.v[3]};
+      // float F_err = state->position.z - S[0];
 
-      //State Measurement Update
-      for(int i = 0; i < 4; i++){
-          S[i] = S[i] + K[i]*F_err;
-      }
+      // //State Measurement Update
+      // for(int i = 0; i < 4; i++){
+      //     S[i] = S[i] + K[i]*F_err;
+      // }
 
-      //Covariance Measurement Update
-      struct mat44 KH = mvecmult44(Kv,H);
-      struct mat44 IKH = msub44(I,KH);
-      struct mat44 P_plus = mmul44(IKH,P_minus);
+      // //Covariance Measurement Update
+      // struct mat44 KH = mvecmult44(Kv,H);
+      // struct mat44 IKH = msub44(I,KH);
+      // struct mat44 P_plus = mmul44(IKH,P_minus);
 
-      //Enforce Covariance Boundaries
-      for(int i = 0; i < 4; ++i){
-        for(int j = i; j < 4;++j){
-          float p = 0.5f*P_plus.m[i][j] + 0.5f*P_plus.m[j][i];
-          if(isnan(p) || p > 100.0f){
-            P_plus.m[i][j] = P_plus.m[j][i] = 100.0f;
-          } else if (i==j && p < 1e-6f){
-            P_plus.m[i][j] = P_plus.m[j][i] = 1e-6f;
-          } else {
-            P_plus.m[i][j] = P_plus.m[j][i] = p;
-          }
-        }
-      }
+      // //Enforce Covariance Boundaries
+      // for(int i = 0; i < 4; ++i){
+      //   for(int j = i; j < 4;++j){
+      //     float p = 0.5f*P_plus.m[i][j] + 0.5f*P_plus.m[j][i];
+      //     if(isnan(p) || p > 100.0f){
+      //       P_plus.m[i][j] = P_plus.m[j][i] = 100.0f;
+      //     } else if (i==j && p < 1e-6f){
+      //       P_plus.m[i][j] = P_plus.m[j][i] = 1e-6f;
+      //     } else {
+      //       P_plus.m[i][j] = P_plus.m[j][i] = p;
+      //     }
+      //   }
+      // }
 
-      mfc.P = P_plus;
-      mfc.F.v[0] = S[0];
-      mfc.F.v[1] = S[1];
-      mfc.F.v[2] = S[2];
-      mfc.F.v[3] = S[3];
+      // mfc.P = P_plus;
+      // mfc.F.v[0] = S[0];
+      // mfc.F.v[1] = S[1];
+      // mfc.F.v[2] = S[2];
+      // mfc.F.v[3] = S[3];
 
       //Direct Solution
       float yd_ddot_min = state->acc.z; // Direct use from trajectory generation
@@ -292,16 +289,8 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       float kw3 = (1.0f/w3);
       float kw4 = (1.0f/w4);
 
-      mfc.F_z_min = (mfc.F_z_min*mfc.u_mfc*mfc.u_mfc*kw3*kw3 - mfc.beta_min*mfc.u_mfc*kw4*kw4 + yd_ddot_min*kw4*kw4)/(mfc.u_mfc*mfc.u_mfc*kw3*kw3 + kw4*kw4);
-      mfc.beta_min = (mfc.beta_min*kw4*kw4 - mfc.F_z_min*mfc.u_mfc*kw3*kw3 + kw3*kw3*yd_ddot_min*mfc.u_mfc)/(mfc.u_mfc*mfc.u_mfc*kw3*kw3 + kw4*kw4);
-
-      // mfc.F_z_min = mfc.F_z_min_prev*(1.0f - lpf) + lpf*mfc.F_z_min;
-      // mfc.beta_min = mfc.beta_min_prev*(1.0f - lpf) + lpf*mfc.beta_min;
-
-      mfc.F_z_min_prev = mfc.F_z_min;
-      mfc.beta_min_prev = mfc.beta_min;
-      
-    
+      mfc.F.v[3] = (mfc.F.v[3]*mfc.u_mfc*mfc.u_mfc*kw3*kw3 - mfc.beta*mfc.u_mfc*kw4*kw4 + yd_ddot_min*kw4*kw4)/(mfc.u_mfc*mfc.u_mfc*kw3*kw3 + kw4*kw4);
+      mfc.beta = (mfc.beta*kw4*kw4 - mfc.F.v[3]*mfc.u_mfc*kw3*kw3 + kw3*kw3*yd_ddot_min*mfc.u_mfc)/(mfc.u_mfc*mfc.u_mfc*kw3*kw3 + kw4*kw4);
 
       //======== Final Controller Calculations ========
       // Compute Acceleration Reference for yd^(v)
@@ -322,15 +311,13 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       */
       //Add an lpf at control output
       float yd_ddot = setpoint->acceleration.z; // Direct use from trajectory generation
-
-      if(gainFlag == 1){
-        mfc.u_mfc = (yd_ddot - mfc.u_c -  mfc.F.v[2])  /  mfc.beta_min;
-        actuatorThrust = (-pwmToThrustB + sqrtf(pwmToThrustB * pwmToThrustB + 4.0f * pwmToThrustA * mfc.u_mfc)) / (2.0f * pwmToThrustA);
-        actuatorThrust = constrain(actuatorThrust,0.0f, 0.9f)*UINT16_MAX; //This seems to always saturate, how do we not hit these bounds?
+      mfc.u_mfc = -(mfc.F.v[3] - yd_ddot + mfc.u_c)  / mfc.beta;
+      mfc.u_mfc = constrain((yd_ddot - mfc.u_c - mfc.F.v[3])  / mfc.beta, 0.0f, 2.5f);
+      if(setpoint->position.z < 0.06f && state->position.z < 0.06f){actuatorThrustMFC = 0; return;}
+      else{
+        actuatorThrustMFC = (-pwmToThrustB + sqrtf(pwmToThrustB * pwmToThrustB + 4.0f * pwmToThrustA * mfc_z.u_mfc)) / (2.0f * pwmToThrustA);
+        actuatorThrustMFC = constrain(actuatorThrustMFC,0.0f, 0.9f)*UINT16_MAX; //This seems to always saturate, how do we not hit these bounds?
       }
-      else
-        mfc.u_mfc = constrain(mfc.u_mfc, 0.0f, 3.0f);
-      if(setpoint->position.z < 0.06f && state->position.z < 0.06f){actuatorThrust = 0; return;}
     }
   }
   
@@ -406,39 +393,16 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
 
 //Logging Parameters
 LOG_GROUP_START(mfcLogs)
-LOG_ADD(LOG_FLOAT, posError, &posErrorLog)
-LOG_ADD(LOG_FLOAT, velError, &velErrorLog)
-LOG_ADD(LOG_FLOAT, d1, &mfc.prev_ydot)
-LOG_ADD(LOG_FLOAT, d2, &yd_ddotLog)
-LOG_ADD(LOG_FLOAT, F1, &mfc.F.v[0])
-LOG_ADD(LOG_FLOAT, F2, &mfc.F.v[1])
-LOG_ADD(LOG_FLOAT, F3, &mfc.F.v[2])
-LOG_ADD(LOG_FLOAT, beta_min, &mfc.beta_min)
-LOG_ADD(LOG_FLOAT, F_min, &mfc.F_z_min)
-LOG_ADD(LOG_FLOAT, S1, &S[0])
-LOG_ADD(LOG_FLOAT, S2, &S[1])
-LOG_ADD(LOG_FLOAT, S3, &S[2])
+LOG_ADD(LOG_FLOAT, thrust, &actuatorThrustMFC)
+LOG_ADD(LOG_FLOAT, d2, &mfc.prev_yddot)
+LOG_ADD(LOG_FLOAT, F, &mfc.F.v[3])
 LOG_ADD(LOG_FLOAT, u_mfc, &mfc.u_mfc)
-LOG_ADD(LOG_FLOAT, u_mfc_PWM, &actuatorThrust)
 LOG_ADD(LOG_FLOAT, u_c, &mfc.u_c)
-LOG_ADD(LOG_FLOAT, P00, &mfc.P.m[0][0])
-LOG_ADD(LOG_FLOAT, P11, &mfc.P.m[1][1])
-LOG_ADD(LOG_FLOAT, P22, &mfc.P.m[2][2])
-LOG_ADD(LOG_FLOAT, cmd_thrust, &cmd_thrust)
-LOG_ADD(LOG_FLOAT, cmd_roll, &cmd_roll)
-LOG_ADD(LOG_FLOAT, cmd_pitch, &cmd_pitch)
-LOG_ADD(LOG_FLOAT, cmd_yaw, &cmd_yaw)
-
-//Some logs about running controllers in parallel
-LOG_ADD(LOG_FLOAT, S31, &mfc.F3.x)
-LOG_ADD(LOG_FLOAT, S32, &mfc.F3.y)
-LOG_ADD(LOG_FLOAT, S33, &mfc.F3.z)
 LOG_GROUP_STOP(mfcLogs)
 
 PARAM_GROUP_START(mfcParams)
-PARAM_ADD(PARAM_FLOAT, beta, &beta_z)
+PARAM_ADD(PARAM_FLOAT, beta, &mfc.beta)
 PARAM_ADD(PARAM_INT16, CTRL_RATE, &CTRL_RATE)
 PARAM_ADD(PARAM_FLOAT, alpha, &lpf)
-PARAM_ADD(PARAM_FLOAT, kp_z, &kp_z)
-PARAM_ADD(PARAM_FLOAT, kd_z, &kd_z)
 PARAM_GROUP_STOP(mfcParams)
+

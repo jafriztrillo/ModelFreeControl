@@ -28,25 +28,23 @@
 #include "stabilizer_types.h"
 #include "math3d.h"
 
-struct mfc_Variables{
+typedef struct mfc_Variables_s {
     //Helper Variables
-    struct vec4 F;
-    struct vec F3;
-    struct mat44 P;
-    struct mat33 P3;
+    struct vec F;
+    struct mat33 P;
     float u_mfc;
     float prev_ydot;
     float prev_yddot;
-    float prev_z_ref;
+    float prev_ref;
     float prev_pos_error;
     float prev_vel_error;
     float u_c;
     float prev_u_c;
-    float F_z_min;
-    float beta_min;
-    float F_z_min_prev;
-    float beta_min_prev;
-};
+    float kp;
+    float kd;
+    float beta;
+    int flag;
+}mfc_Variables_t;
 
 void controllerOutOfTreeInit();
 bool controllerOutofTreeTest(void);
