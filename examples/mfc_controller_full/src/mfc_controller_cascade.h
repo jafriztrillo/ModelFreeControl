@@ -27,6 +27,7 @@
 
 #include "stabilizer_types.h"
 #include "math3d.h"
+
 typedef struct mfc_Variables_s {
     //Helper Variables
     struct vec F;

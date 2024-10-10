@@ -115,6 +115,9 @@ static struct {
   int16_t ax;
   int16_t ay;
   int16_t az;
+  // roll and pitch - useful for internal controller logging
+  int16_t roll;
+  int16_t pitch;
 } setpointCompressed;
 
 STATIC_MEM_TASK_ALLOC(stabilizerTask, STABILIZER_TASK_STACKSIZE);
@@ -167,6 +170,10 @@ static void compressSetpoint()
   setpointCompressed.ax = setpoint.acceleration.x * 1000.0f;
   setpointCompressed.ay = setpoint.acceleration.y * 1000.0f;
   setpointCompressed.az = setpoint.acceleration.z * 1000.0f;
+
+  float const deg2millirad = ((float)M_PI * 1000.0f) / 180.0f;
+  setpointCompressed.roll = setpoint.attitude.roll * deg2millirad;
+  setpointCompressed.pitch = setpoint.attitude.pitch * deg2millirad;
 }
 
 void stabilizerInit(StateEstimatorType estimator)
@@ -495,6 +502,16 @@ LOG_ADD(LOG_INT16, ay, &setpointCompressed.ay)
  * @brief Desired acceleration Z [mm/s^2]
  */
 LOG_ADD(LOG_INT16, az, &setpointCompressed.az)
+// Customs
+/**
+ * @brief Desired attitude, roll [deg]
+ */
+LOG_ADD_CORE(LOG_FLOAT, roll, &setpointCompressed.roll)
+
+/**
+ * @brief Desired attitude, pitch [deg]
+ */
+LOG_ADD_CORE(LOG_FLOAT, pitch, &setpointCompressed.pitch)
 LOG_GROUP_STOP(ctrltargetZ)
 
 /**

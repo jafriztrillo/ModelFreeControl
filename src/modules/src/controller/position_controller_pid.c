@@ -93,7 +93,7 @@ static float velZFiltCutoff = PID_VEL_Z_FILT_CUTOFF;
 static struct this_s this = {
   .pidVX = {
     .pid = {
-      .kp = PID_VEL_X_KP,
+      .kp = 31.0f,
       .ki = PID_VEL_X_KI,
       .kd = PID_VEL_X_KD,
       .kff = PID_VEL_X_KFF,
@@ -103,7 +103,7 @@ static struct this_s this = {
 
   .pidVY = {
     .pid = {
-      .kp = PID_VEL_Y_KP,
+      .kp = 31.0f,
       .ki = PID_VEL_Y_KI,
       .kd = PID_VEL_Y_KD,
       .kff = PID_VEL_Y_KFF,
@@ -259,11 +259,10 @@ void velocityController(float* thrust, attitude_t *attitude, const Axis3f* setpo
   attitude->pitch = -runPid(state_body_vx, &this.pidVX, setpoint_velocity->x, DT);
   attitude->roll = -runPid(state_body_vy, &this.pidVY, setpoint_velocity->y, DT);
 
-  rollDLog = attitude->roll;
-  pitchDLog = attitude->pitch;
-
   attitude->roll  = constrain(attitude->roll,  -rLimit, rLimit);
   attitude->pitch = constrain(attitude->pitch, -pLimit, pLimit);
+  rollDLog = attitude->roll;
+  pitchDLog = attitude->pitch;
 
   // Thrust
   float thrustRaw = runPid(state->velocity.z, &this.pidVZ, setpoint_velocity->z, DT);

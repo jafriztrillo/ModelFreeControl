@@ -38,7 +38,7 @@
 // #include "controller.h"
 // #include "controller_pid.h"
 #include "math3d.h"
-#include "mfc_controller_pos.h"
+#include "mfc_controller_cascade.h"
 #include "position_controller.h"
 #include "attitude_controller.h"
 #include "log.h"
@@ -49,18 +49,19 @@
 #include "pid.h"
 
 //Controller Gains
-const static int CTRL_RATE = 200;
+const static int CTRL_RATE = 100;
 float ATTITUDE_UPDATE_DT = (float)(1.0f/ATTITUDE_RATE);
 static float DT_POS = (float)(1.0f/CTRL_RATE);
 float state_body_x, state_body_y, state_body_vx, state_body_vy;
 static float pwmToThrustA = 0.091492681f;
 static float pwmToThrustB = 0.067673604f;
-static float rLimit = 40.0f * (float)M_PI / 180.0f;
-static float pLimit = 40.0f * (float)M_PI / 180.0f;
+static float rLimit = 30.0f * (float)M_PI / 180.0f;
+static float pLimit = 30.0f * (float)M_PI / 180.0f;
 
 static attitude_t attitudeDesired;
 static attitude_t attitudeDesiredMFC;
 static attitude_t rateDesired;
+struct vec att_ddot_prev;
 // static float actuatorThrust;
 static float actuatorThrustMFC;
 static float lpf;
@@ -77,11 +78,8 @@ static float r_pitch;
 static float r_yaw;
 static float accelz;
 float vx, vy;
-int16_t ux_compressed;
-int16_t uy_compressd;
-int16_t rollDes_compressed;
-int16_t pitchDes_compressed;
-static float const deg2millirad = ((float)M_PI * 1000.0f) / 180.0f;
+float x_uc;
+float y_uc;
 
 int16_t resetTick;
 uint64_t start_time,end_time;
@@ -114,9 +112,9 @@ mfc_Variables_t mfc_x = {
   .prev_vel_error = 0.0f,
   .prev_pos_error = 0.0f,
   .u_c = 0.0f,
-  .kp =  31.0f,
-  .kd =   11.71f,
-  .beta = 130.0f,
+  .kp = 7.0f,
+  .kd = 5.0f,
+  .beta = 140.0f,
   .flag = 1,
 };
 
@@ -133,10 +131,9 @@ mfc_Variables_t mfc_y = {
   .prev_vel_error = 0.0f,
   .prev_pos_error = 0.0f,
   .u_c = 0.0f,
-  .u_c = 0.0f,
-  .kp =  31.0f,
-  .kd =   11.71f,
-  .beta = 130.0f,
+  .kp = 7.0f,
+  .kd = 5.0f,
+  .beta = 140.0f,
   .flag = 2.
 };
 
@@ -155,9 +152,67 @@ mfc_Variables_t mfc_z = {
   .u_c = 0.0f,
   .kp = 38.0f,
   .kd = 11.0f,
-  .beta = 55.0f,
+  .beta = 40.0f,
   .flag = 3,
 };
+
+mfc_Variables_t mfc_roll = {
+  .F.x = 0.0f,
+  .F.y = 0.0f,
+  .F.z = -1e-6f,
+  .P.m[0][0] = 1e-6f,
+  .P.m[1][1] = 1e-6f,
+  .P.m[2][2] = 1e-6f,
+  .u_mfc = 0.0f,
+  .prev_ydot = 0.0f,
+  .prev_yddot = 0.0f,
+  .prev_vel_error = 0.0f,
+  .prev_pos_error = 0.0f,
+  .u_c = 0.0f,
+  .kp = 7.0f,
+  .kd = 5.0f,
+  .beta = 140.0f,
+  .flag = 1,
+};
+
+mfc_Variables_t mfc_pitch = {
+  .F.x = 0.0f,
+  .F.y = 0.0f,
+  .F.z = -1e-6f,
+  .P.m[0][0] = 1e-6f,
+  .P.m[1][1] = 1e-6f,
+  .P.m[2][2] = 1e-6f,
+  .u_mfc = 0.0f,
+  .prev_ydot = 0.0f,
+  .prev_yddot = 0.0f,
+  .prev_vel_error = 0.0f,
+  .prev_pos_error = 0.0f,
+  .u_c = 0.0f,
+  .kp = 7.0f,
+  .kd = 5.0f,
+  .beta = 140.0f,
+  .flag = 2.
+};
+
+mfc_Variables_t mfc_yaw = {
+  .F.x = 0.0f,
+  .F.y = 0.0f,
+  .F.z = -1e-6f,
+  .P.m[0][0] = 1e-6f,
+  .P.m[1][1] = 1e-6f,
+  .P.m[2][2] = 1e-6f,
+  .u_mfc = 0.0f,
+  .prev_ydot = 0.0f,
+  .prev_yddot = 0.0f,
+  .prev_vel_error = 0.0f,
+  .prev_pos_error = 0.0f,
+  .u_c = 0.0f,
+  .kp = 38.0f,
+  .kd = 11.0f,
+  .beta = 40.0f,
+  .flag = 3,
+};
+
 
 
 // Some Default Functions left by Bitcraze
@@ -228,7 +283,7 @@ void linearKF(mfc_Variables_t *mfc, float sens_val, float DT){
                          {0.0f, 1.0f, DT},
                          {0.0f, 0.0f, 1.0f}}};
       struct mat33 I = meye();
-      float HPHR = 0.0025f*0.0025f; //This is from Bitcraze themselves. The actual stdDev is a function but it varies from 0.0025:0.003 between 0m and 1m
+      float HPHR = 0.00025f*0.00025f; //This is from Bitcraze themselves. The actual stdDev is a function but it varies from 0.0025:0.003 between 0m and 1m
       struct mat33 P_plus_prev = mfc->P;
 
       // start_time = usecTimestamp();
@@ -335,7 +390,9 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
 
       //Need to filter derivitive  terms
       mfc_x.u_c = mfc_x.kp*(state->position.x - setpoint->position.x) + (mfc_x.kd)*(state->velocity.x - setpoint->velocity.x);
+      x_uc = mfc_x.u_c;
       mfc_y.u_c = mfc_y.kp*(state->position.y - setpoint->position.y) +  (mfc_y.kd)*(state->velocity.y - setpoint->velocity.y);
+      y_uc = mfc_y.u_c;
       mfc_z.u_c = mfc_z.kp*(state->position.z - setpoint->position.z) + (mfc_z.kd)*(state->velocity.z - setpoint->velocity.z);
 
 
@@ -358,7 +415,6 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       else{
         yd_ddot_z = lpf*yd_ddot_z + (1.0f-lpf)*mfc_z.prev_yddot;
       }
-      mfc_z.prev_yddot = yd_ddot_z;
     
       // Control Effort to Thrust
       /*
@@ -367,7 +423,7 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       zero at some points but otherwise this works well. Need to investigate later
       */
       mfc_z.u_mfc = -(mfc_z.F.z - yd_ddot_z + mfc_z.u_c)  / mfc_z.beta;
-      mfc_z.u_mfc = constrain((yd_ddot_z - mfc_z.u_c - mfc_z.F.z)  / mfc_z.beta, 0.0f, 2.5f);
+      mfc_z.u_mfc = constrain((yd_ddot_z - mfc_z.u_c - mfc_z.F.z)  / mfc_z.beta, 0.0f, 3.0f);
       if(setpoint->position.z < 0.06f && state->position.z < 0.06f){actuatorThrustMFC = 0; return;}
       else{
         actuatorThrustMFC = (-pwmToThrustB + sqrtf(pwmToThrustB * pwmToThrustB + 4.0f * pwmToThrustA * mfc_z.u_mfc)) / (2.0f * pwmToThrustA);
@@ -382,22 +438,6 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       float yd_ddot_x = setpoint->acceleration.x;
       float yd_ddot_y = setpoint->acceleration.y;
 
-      if(fabs(yd_ddot_x) > 2.5){
-        yd_ddot_x = mfc_x.prev_yddot;
-      }
-      else{
-        yd_ddot_x = lpf*yd_ddot_x + (1.0f-lpf)*mfc_x.prev_yddot;
-      }
-      mfc_x.prev_yddot = yd_ddot_x;
-
-      if(fabs(yd_ddot_y) > 2.5){
-        yd_ddot_y = mfc_y.prev_yddot;
-      }
-      else{
-        yd_ddot_y = lpf*yd_ddot_y + (1.0f-lpf)*mfc_y.prev_yddot;
-      }
-      mfc_y.prev_yddot = yd_ddot_y;
-
       // Compute Virtual Inputs
       mfc_x.u_mfc = (yd_ddot_x - mfc_x.u_c - mfc_x.F.z)  / mfc_x.beta;
       mfc_y.u_mfc = (yd_ddot_y - mfc_y.u_c - mfc_y.F.z)  / mfc_y.beta;
@@ -406,43 +446,47 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       float ux = (sinyaw * mfc_x.u_mfc - cosyaw * mfc_y.u_mfc) / mfc_z.u_mfc;
       float uy = (cosyaw * mfc_x.u_mfc + sinyaw * mfc_y.u_mfc) / mfc_z.u_mfc;
 
-      // //Compress and Log
-      // ux_compressed = ux * 1000.0f;
-      // uy_compressd = uy * 1000.0f;
-    
+      
       // Assign Desired Roll/Pitch
       phi_des = asinf(ux);
       theta_des = asinf(uy/cosf(phi_des));
       attitudeDesiredMFC.roll = degrees(constrain(phi_des, -rLimit, rLimit));
       attitudeDesiredMFC.pitch  = -degrees(constrain(theta_des, -pLimit, pLimit));
+      attitudeDesiredMFC.yaw = 0.0f;
 
-      // // ======== ATTITUDE CONTROLLER ========
-      // // Are these going to be too noisy?
-      // float stateAttitudeRateRoll = radians(sensors->gyro.x);
-      // float stateAttitudeRatePitch = radians(sensors->gyro.y);
-      // float stateAttitudeRateYaw = radians(sensors->gyro.z);
+      // ======== ATTITUDE CONTROLLER ========
+      // Are these going to be too noisy?
+      float stateAttitudeRateRoll = radians(sensors->gyro.x);
+      float stateAttitudeRatePitch = -radians(sensors->gyro.y);
+      float stateAttitudeRateYaw = radians(sensors->gyro.z);
 
-      // struct vec attErr = {state->attitude.roll - attitudeDesired.roll, state->attitude.pitch - attitudeDesired.pitch, state->attitude.yaw - setpoint->attitude.yaw};
-      // struct vec attRateErr = {stateAttitudeRateRoll - setpoint->attitudeRate.roll, stateAttitudeRatePitch - setpoint->attitudeRate.pitch, stateAttitudeRateYaw - setpoint->attitudeRate.yaw};
-      // mfc_roll.u_c = mfc_roll.kp*attErr.x +  mfc_roll.kd*attRateErr.x;
-      // mfc_pitch.u_c = mfc_pitch.kp*attErr.y +  mfc_pitch.kd*attRateErr.y;
-      // mfc_yaw.u_c = mfc_yaw.kp*attErr.z +  mfc_yaw.kd*attRateErr.z;
+      struct vec attErr = {state->attitude.roll - attitudeDesiredMFC.roll, state->attitude.pitch - attitudeDesiredMFC.pitch, state->attitude.yaw - setpoint->attitude.yaw};
+      struct vec attErr_prev = {attErr.x, attErr.y, attErr.z};
+      struct vec attRateErr = {stateAttitudeRateRoll - setpoint->attitudeRate.roll, stateAttitudeRatePitch - setpoint->attitudeRate.pitch, stateAttitudeRateYaw - setpoint->attitudeRate.yaw};
+      mfc_roll.u_c = mfc_roll.kp*attErr.x +  mfc_roll.kd*attRateErr.x;
+      mfc_pitch.u_c = mfc_pitch.kp*attErr.y +  mfc_pitch.kd*attRateErr.y;
+      mfc_yaw.u_c = mfc_yaw.kp*attErr.z +  mfc_yaw.kd*attRateErr.z;
 
-      // // =============== Estimation of F ===============
-      // linearKF(&mfc_roll, state->attitude.roll, ATTITUDE_UPDATE_DT);
-      // linearKF(&mfc_pitch, state->attitude.pitch, ATTITUDE_UPDATE_DT);     
-      // linearKF(&mfc_yaw, state->attitude.yaw, ATTITUDE_UPDATE_DT);
+      // =============== Estimation of F ===============
+      linearKF(&mfc_roll, state->attitude.roll, ATTITUDE_UPDATE_DT);
+      linearKF(&mfc_pitch, state->attitude.pitch, ATTITUDE_UPDATE_DT);     
+      linearKF(&mfc_yaw, state->attitude.yaw, ATTITUDE_UPDATE_DT);
 
-      // // Cap the setpoints
-      // float yd_ddot_x = setpoint->acceleration.x;
-      // float yd_ddot_y = setpoint->acceleration.y;
+      //Can I avoid derivitive kick from the setpoint by using the sensor value instead of the error?
+      float yd_dot_r = (attErr.x - attErr_prev.x)/ATTITUDE_UPDATE_DT;
+      float yd_dot_p = (attErr.y - attErr_prev.y)/ATTITUDE_UPDATE_DT;
 
-      // // Compute Virtual Inputs
-      // mfc_roll.u_mfc = (yd_ddot_x - mfc_roll.u_c - mfc_roll.F.z)  / beta_r;
-      // float uy = (yd_ddot_y - mfc_y.u_c - mfc_y.F.z)  / beta_y;
+      //Double D of Setpoint & Filtered
+      float yd_ddot_r = (yd_dot_r - att_ddot_prev.x)/ATTITUDE_UPDATE_DT;
+      float yd_ddot_p = (yd_dot_p - att_ddot_prev.y)/ATTITUDE_UPDATE_DT;
+      att_ddot_prev.x = yd_ddot_r;
+      att_ddot_prev.y =  yd_ddot_p;
 
-      //Compress Some States for Logging
-      
+      //Final Control Calculation
+      mfc_roll.u_mfc = (yd_ddot_r - mfc_roll.u_c -  mfc_roll.F.z) / mfc_roll.beta;
+      mfc_pitch.u_mfc = (yd_ddot_p - mfc_pitch.u_c -  mfc_pitch.F.z) / mfc_pitch.beta;
+      mfc_yaw.u_mfc = (0.0f - mfc_yaw.u_c -  mfc_yaw.F.z) / mfc_yaw.beta;
+
     }
   }
   
@@ -520,9 +564,8 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
 
 //Logging Parameters
 LOG_GROUP_START(mfcLogs)
-LOG_ADD(LOG_FLOAT, u_2, &attitudeDesiredMFC.roll)
-LOG_ADD(LOG_FLOAT, u_3, &attitudeDesiredMFC.pitch)
-LOG_ADD(LOG_FLOAT, u_1, &mfc_z.u_mfc)
+LOG_ADD(LOG_FLOAT, roll_d, &attitudeDesiredMFC.roll)
+LOG_ADD(LOG_FLOAT, pitch_d, &attitudeDesiredMFC.pitch)
 LOG_ADD(LOG_FLOAT, vx, &vx)
 LOG_ADD(LOG_FLOAT, vy, &vy)
 LOG_ADD(LOG_FLOAT, PID_PWM_Thrust, &actuatorThrustMFC)

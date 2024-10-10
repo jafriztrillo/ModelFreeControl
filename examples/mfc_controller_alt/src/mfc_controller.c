@@ -46,14 +46,14 @@
 #include "platform_defaults.h"
 #include "num.h"
 #include "param.h"
+#include "pid.h"
 
 
 //Controller Gains
-const static int CTRL_RATE = 360;
-float kp_z = 31.0f;
-float kd_z = 16.0f;
-float beta_z = 37.0f;
-// float u_mfc = 0;
+const static int CTRL_RATE = 100;
+const static float kp_z = 38.0f;
+const static float kd_z = 11.0f;
+float beta_z = 25.0f;
 float S[3] = {0.0f};
 float ATTITUDE_UPDATE_DT = (float)(1.0f/ATTITUDE_RATE);
 float DT_POS = (float)(1.0f/CTRL_RATE);
@@ -85,7 +85,7 @@ static float accelz;
 int16_t resetTick;
 uint64_t start_time,end_time;
 
-static struct mfc_Variables mfc = {
+mfc_Variables_t mfc_z = {
   .F.x = 0.0f,
   .F.y = 0.0f,
   .F.z = -1e-6f,
@@ -98,8 +98,10 @@ static struct mfc_Variables mfc = {
   .prev_vel_error = 0.0f,
   .prev_pos_error = 0.0f,
   .u_c = 0.0f,
+  .beta = 47.0f,
 };
-static struct mfc_Variables EmptyStruct ={
+
+mfc_Variables_t EmptyStruct ={
   .F.x = 0.0f,
   .F.y = 0.0f,
   .F.z = -1e-6f,
@@ -114,6 +116,7 @@ static struct mfc_Variables EmptyStruct ={
   .u_c = 0.0f,
 };
 
+// Some Utility Functions
 
 static float capAngle(float angle) {
   float result = angle;
@@ -129,8 +132,43 @@ static float capAngle(float angle) {
   return result;
 }
 
+// PID Helpers to Use BCs internal PID structure
+// struct pidAxis_s {
+//   PidObject pid;
+
+//   stab_mode_t previousMode;
+//   float setpoint;
+
+//   float output;
+// };
+
+// struct this_s {
+//   struct pidAxis_s pidMFC;
+// };
+
+// static struct this_s this = {
+//   .pidMFC = {
+//     .pid = {
+//       .kp = kp_z,
+//       .ki = 0.0f,
+//       .kd = kd_z,
+//       .kff = 0.0f,
+//     },
+//     .pid.dt = (float)1/CTRL_RATE,
+//   }
+// };
+
+// static float runPid(float input, struct pidAxis_s *axis, float setpoint, float dt) {
+//   axis->setpoint = setpoint;
+
+//   pidSetDesired(&axis->pid, axis->setpoint);
+//   return pidUpdate(&axis->pid, input, true);
+// }
+
+// =========== End Of PID Helpers ============
+
 void mfcParamReset(){
-  mfc = EmptyStruct;
+  mfc_z = EmptyStruct;
 }
 
 
@@ -148,6 +186,8 @@ void controllerOutOfTreeInit() {
   // Initialize your controller data here...
   // Call the PID controller instead in this example to make it possible to fly
   // controllerPidInit();
+  // pidInit(&this.pidMFC.pid, this.pidMFC.setpoint, this.pidMFC.pid.kp, this.pidMFC.pid.ki, this.pidMFC.pid.kd,
+  //     this.pidMFC.pid.kff, this.pidMFC.pid.dt, CTRL_RATE, 20.0f, true);
   attitudeControllerInit(ATTITUDE_UPDATE_DT);
   positionControllerInit();
 }
@@ -205,12 +245,16 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       // =============== Internal Controller ==================
       float posError = state->position.z - setpoint->position.z;
       float velError = state->velocity.z - setpoint->velocity.z;
-      mfc.u_c = kp_z*posError + kd_z*velError;
-      // u_c = lpf*u_c + (1-lpf)*mfc.prev_u_c;
-      // mfc.prev_u_c = u_c;
-      posErrorLog = posError;
-      velErrorLog = velError;
+      mfc_z.u_c = kp_z*posError + kd_z*velError;
+      // u_c = lpf*u_c + (1-lpf)*mfc_z.prev_u_c;
+      // mfc_z.prev_u_c = u_c;
+      // posErrorLog = posError;
+      // velErrorLog = velError;
 
+      // Try using their PID structure?
+      // mfc_z.u_c = runPid(setpoint->position.z, &this.pidMFC, state->position.z, DT_POS);
+
+    
       // =============== Estimation of F ===============
       //Predeclared Constant Matrices
       struct mat33 Q = mdiag(0.1f,0.1f,0.1f);
@@ -221,13 +265,13 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
                          {0.0f, 0.0f, 1.0f}}};
       struct mat33 I = meye();
       float HPHR = 0.0025f*0.0025f; //This is from Bitcraze themselves. The actual stdDev is a function but it varies from 0.0025:0.003 between 0m and 1m
-      struct mat33 P_plus_prev = mfc.P;
+      struct mat33 P_plus_prev = mfc_z.P;
 
       // start_time = usecTimestamp();
       //State Prediction
-      S[0] = mfc.F.x + mfc.F.y*DT_POS + 0.5f*mfc.F.z*DT_POS*DT_POS + 0.5f*beta_z*DT_POS*DT_POS*mfc.u_mfc;
-      S[1] = mfc.F.y + mfc.F.z*DT_POS + beta_z*DT_POS*mfc.u_mfc;
-      S[2] = mfc.F.z;
+      S[0] = mfc_z.F.x + mfc_z.F.y*DT_POS + 0.5f*mfc_z.F.z*DT_POS*DT_POS + 0.5f*beta_z*DT_POS*DT_POS*mfc_z.u_mfc;
+      S[1] = mfc_z.F.y + mfc_z.F.z*DT_POS + beta_z*DT_POS*mfc_z.u_mfc;
+      S[2] = mfc_z.F.z;
 
       //Covariance Prediction
       struct mat33 AT = mtranspose(A);
@@ -273,10 +317,10 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
         }
       }
 
-      mfc.P = P_plus;
-      mfc.F.x = S[0];
-      mfc.F.y = S[1];
-      mfc.F.z = S[2];
+      mfc_z.P = P_plus;
+      mfc_z.F.x = S[0];
+      mfc_z.F.y = S[1];
+      mfc_z.F.z = S[2];
       // end_time = usecTimestamp();
 
       //======== Final Controller Calculations ========
@@ -284,17 +328,17 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
 
       float yd_ddot = setpoint->acceleration.z; // Direct use from trajectory generation
 
-      // float yd_dot = (setpoint->position.z - mfc.prev_z_ref)/CTRL_RATE;
-      // float yd_ddot = yd_dot - mfc.prev_ydot/CTRL_RATE;
+      // float yd_dot = (setpoint->position.z - mfc_z.prev_z_ref)/CTRL_RATE;
+      // float yd_ddot = yd_dot - mfc_z.prev_ydot/CTRL_RATE;
       if(fabs(yd_ddot) > 2.5){
-        yd_ddot = mfc.prev_yddot;
+        yd_ddot = mfc_z.prev_yddot;
       }
       else{
-        yd_ddot = lpf*yd_ddot + (1.0f-lpf)*mfc.prev_yddot;
+        yd_ddot = lpf*yd_ddot + (1.0f-lpf)*mfc_z.prev_yddot;
       }
-      // mfc.prev_ydot = yd_dot;
-      // mfc.prev_yddot = yd_ddot;
-      // mfc.prev_z_ref  = setpoint->position.z;
+      // mfc_z.prev_ydot = yd_dot;
+      mfc_z.prev_yddot = yd_ddot;
+      // mfc_z.prev_z_ref  = setpoint->position.z;
       yd_ddotLog = yd_ddot;
     
       // Control Effort to Thrust
@@ -303,11 +347,11 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       flatness gives us the derivitives of our trajectory generation. A weird consequence is the setpoints don't seem to be too smooth which makes the double derivitive
       zero at some points but otherwise this works well. Need to investigate later
       */
-      mfc.u_mfc = (yd_ddot - mfc.u_c - mfc.F.z)  / beta_z;
-      mfc.u_mfc = constrain((yd_ddot - mfc.u_c - mfc.F.z)  / beta_z, 0.0f, 3.0f);
+      mfc_z.u_mfc = (yd_ddot - mfc_z.u_c - mfc_z.F.z)  / beta_z;
+      mfc_z.u_mfc = constrain((yd_ddot - mfc_z.u_c - mfc_z.F.z)  / beta_z, 0.0f, 3.0f);
       if(setpoint->position.z < 0.06f && state->position.z < 0.06f){actuatorThrustMFC = 0; return;}
       else{
-        actuatorThrustMFC = (-pwmToThrustB + sqrtf(pwmToThrustB * pwmToThrustB + 4.0f * pwmToThrustA * mfc.u_mfc)) / (2.0f * pwmToThrustA);
+        actuatorThrustMFC = (-pwmToThrustB + sqrtf(pwmToThrustB * pwmToThrustB + 4.0f * pwmToThrustA * mfc_z.u_mfc)) / (2.0f * pwmToThrustA);
         actuatorThrustMFC = constrain(actuatorThrustMFC,0.0f, 0.9f)*UINT16_MAX; //This seems to always saturate, how do we not hit these bounds?
       }
     }
@@ -374,7 +418,7 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
 
     attitudeControllerResetAllPID();
     positionControllerResetAllPID();
-    mfcParamReset();
+    // mfcParamReset();
 
     // Reset the calculated YAW angle for rate control
     attitudeDesired.yaw = state->attitude.yaw;
@@ -388,21 +432,21 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
 LOG_GROUP_START(mfcLogs)
 LOG_ADD(LOG_FLOAT, posError, &posErrorLog)
 LOG_ADD(LOG_FLOAT, velError, &velErrorLog)
-LOG_ADD(LOG_FLOAT, d1, &mfc.prev_ydot)
-LOG_ADD(LOG_FLOAT, d2, &yd_ddotLog)
-LOG_ADD(LOG_FLOAT, F1, &mfc.F.x)
-LOG_ADD(LOG_FLOAT, F2, &mfc.F.y)
-LOG_ADD(LOG_FLOAT, F3, &mfc.F.z)
+LOG_ADD(LOG_FLOAT, d1, &mfc_z.prev_ydot)
+LOG_ADD(LOG_FLOAT, d2, &mfc_z.prev_yddot)
+LOG_ADD(LOG_FLOAT, F1, &mfc_z.F.x)
+LOG_ADD(LOG_FLOAT, F2, &mfc_z.F.y)
+LOG_ADD(LOG_FLOAT, F3, &mfc_z.F.z)
 LOG_ADD(LOG_FLOAT, S1, &S[0])
 LOG_ADD(LOG_FLOAT, S2, &S[1])
 LOG_ADD(LOG_FLOAT, S3, &S[2])
-LOG_ADD(LOG_FLOAT, u_mfc, &mfc.u_mfc)
+LOG_ADD(LOG_FLOAT, u_mfc, &mfc_z.u_mfc)
 LOG_ADD(LOG_FLOAT, PID_PWM_Thrust, &actuatorThrust)
 LOG_ADD(LOG_FLOAT, u_mfc_PWM, &actuatorThrustMFC)
-LOG_ADD(LOG_FLOAT, u_c, &mfc.u_c)
-LOG_ADD(LOG_FLOAT, P00, &mfc.P.m[0][0])
-LOG_ADD(LOG_FLOAT, P11, &mfc.P.m[1][1])
-LOG_ADD(LOG_FLOAT, P22, &mfc.P.m[2][2])
+LOG_ADD(LOG_FLOAT, u_c, &mfc_z.u_c)
+LOG_ADD(LOG_FLOAT, P00, &mfc_z.P.m[0][0])
+LOG_ADD(LOG_FLOAT, P11, &mfc_z.P.m[1][1])
+LOG_ADD(LOG_FLOAT, P22, &mfc_z.P.m[2][2])
 LOG_ADD(LOG_FLOAT, cmd_thrust, &cmd_thrust)
 LOG_ADD(LOG_FLOAT, cmd_roll, &cmd_roll)
 LOG_ADD(LOG_FLOAT, cmd_pitch, &cmd_pitch)
@@ -411,8 +455,8 @@ LOG_GROUP_STOP(mfcLogs)
 
 PARAM_GROUP_START(mfcParams)
 PARAM_ADD(PARAM_FLOAT, beta, &beta_z)
-PARAM_ADD(PARAM_INT16, CTRL_RATE, &CTRL_RATE)
+// PARAM_ADD(PARAM_INT16, CTRL_RATE, &CTRL_RATE)
 PARAM_ADD(PARAM_FLOAT, alpha, &lpf)
-PARAM_ADD(PARAM_FLOAT, kp_z, &kp_z)
-PARAM_ADD(PARAM_FLOAT, kd_z, &kd_z)
+// PARAM_ADD(PARAM_FLOAT, kp_z, &kp_z)
+// PARAM_ADD(PARAM_FLOAT, kd_z, &kd_z)
 PARAM_GROUP_STOP(mfcParams)
