@@ -52,8 +52,8 @@
 
 //Controller Gains
 const static int CTRL_RATE = 100;
-float w3 = 5.0f;
-float w4 = 50.0f;
+float w3 = 1.0f;
+float w4 = 1.0f;
 // float u_mfc = 0;
 float ATTITUDE_UPDATE_DT = (float)(1.0f/ATTITUDE_RATE);
 float DT_POS = (float)(1.0f/CTRL_RATE);
@@ -91,8 +91,8 @@ mfc_Variables_t mfc = {
   .F.v[1] = 0.0f,
   .F.v[2] = -1e-6f,
   .F.v[3] = 37.0f,
-  .F_min.v[2] = -1e-4f,
-  .F_min.v[3] = 40.0f,
+  .F_min.v[2] = -6.0f,
+  .F_min.v[3] = 57.0f,
   .P.m[0][0] = 1e-6f,
   .P.m[1][1] = 1e-6f,
   .P.m[2][2] = 1e-6f,
@@ -103,8 +103,8 @@ mfc_Variables_t mfc = {
   .prev_vel_error = 0.0f,
   .prev_pos_error = 0.0f,
   .u_c = 0.0f,
-  .kp = 38.0f,
-  .kd = 11.0f,
+  .kp = 31.0f,
+  .kd = 17.0f,
   .beta = 55.0f,
   .flag = 3,
 };
@@ -218,8 +218,8 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       velErrorLog = velError;
 
       // Literally unreadable otherwise
-      F_min = mfc.F_min.v[2];
-      beta_min = mfc.F_min.v[3];
+      F_min = mfc.F_min.v[2];// + 0.1f*sensors->gyro.z;
+      beta_min = mfc.F_min.v[3];// + 0.1f*sensors->gyro.z;
 
       // =============== Estimation of F ===============
       //Predeclared Constant Matrices
@@ -232,7 +232,7 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
                           {0.0f, 0.0f, 1.0f, 0.0f},
                           {0.0f, 0.0f, 0.0f, 1.0f}}};
       struct mat44 I = meye44();
-      float HPHR = 4e-3*4e-3f; //This is from Bitcraze themselves. The actual stdDev is a function but it varies from 0.0025:0.003 between 0m and 1m
+      float HPHR = 4e-3f*4e-3f; //This is from Bitcraze themselves. The actual stdDev is a function but it varies from 0.0025:0.003 between 0m and 1m
       struct mat44 P_plus_prev = mfc.P;
 
       //State Prediction
@@ -292,21 +292,14 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       mfc.F.v[3] = S[3];
 
       //Direct Solution
-      float yd_ddot = state->acc.z; // How does this vary compared to the setpoint use?
+    float y_v = state->acc.z;// +  0.1f*sensors->gyro.z; // How does this vary compared to the setpoint use?
+    // float kw3 = (1.0f/w3);
+    // float kw4 = (1.0f/w4);
+    // mfc.F_min.v[2] = (F_min*powf(mfc.u_mfc,2.0)*powf(kw3,2.0) - mfc.beta*mfc.u_mfc*powf(kw4,2.0) + y_v*powf(kw4,2.0)) / (powf(mfc.u_mfc,2.0)*powf(kw3,2.0) + powf(kw4,2.0));
+    // mfc.F_min.v[3] = (beta_min*powf(kw4,2.0) - F_min*mfc.u_mfc*powf(kw3,2.0)+ powf(kw3,2.0)*y_v*mfc.u_mfc) / (powf(mfc.u_mfc,2.0)*powf(kw3,2.0) + powf(kw4,2.0));
 
-
-      //Standard MFC Approach W/ ZoH
-      if(fabs(yd_ddot) > 2.5){
-        yd_ddot = mfc.prev_yddot;
-      }
-      else{
-        yd_ddot = lpf*yd_ddot + (1.0f-lpf)*mfc.prev_yddot;
-      }
-    float kw3 = (1.0f/w3);
-    float kw4 = (1.0f/w4);
-
-    mfc.F_min.v[2] = (F_min*powf(mfc.u_mfc,2.0)*powf(kw3,2.0) - mfc.beta*mfc.u_mfc*powf(kw4,2.0) + yd_ddot*powf(kw4,2.0)) / (powf(mfc.u_mfc,2.0)*powf(kw3,2.0) + powf(kw4,2.0));
-    mfc.F_min.v[3] = (beta_min*powf(kw4,2.0) - F_min*mfc.u_mfc*powf(kw3,2.0)+ powf(kw3,2.0)*yd_ddot*mfc.u_mfc) / (powf(mfc.u_mfc,2.0)*powf(kw3,2.0) + powf(kw4,2.0));
+      mfc.F_min.v[2] = (F_min*powf(mfc.u_mfc,2.0) - beta_min*mfc.u_mfc + y_v) / (powf(mfc.u_mfc,2.0) + 1.0f);
+      mfc.F_min.v[3] = (beta_min - F_min*mfc.u_mfc + y_v*mfc.u_mfc) / (powf(mfc.u_mfc,2.0) + 1.0f);
 
       //======== Final Controller Calculations ========
       // Compute Acceleration Reference for yd^(v)
@@ -326,8 +319,8 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
       zero at some points but otherwise this works well. Need to investigate later
       */
       //Add an lpf at control output
-      float yd_ddot = setpoint->acceleration.z; // Direct use from trajectory generation
-      mfc.u_mfc = -(mfc.F_min.v[2] - yd_ddot + mfc.u_c)  / mfc.F_min.v[3];
+      float yd_ddot = setpoint->acceleration.z;// +  0.1f*sensors->gyro.z;
+      mfc.u_mfc = (yd_ddot - mfc.F_min.v[2]  - mfc.u_c)  / mfc.F_min.v[3];
       mfc.u_mfc = constrain((yd_ddot - mfc.u_c - mfc.F_min.v[2])  / mfc.F_min.v[3], 0.0f, 2.5f);
       if(setpoint->position.z < 0.06f && state->position.z < 0.06f){actuatorThrustMFC = 0; return;}
       else{
@@ -340,7 +333,7 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
   if (RATE_DO_EXECUTE(ATTITUDE_RATE, stabilizerStep)) {
     // Switch between manual and automatic position control
     if (setpoint->mode.z == modeDisable) {
-      actuatorThrust = setpoint->thrust;
+      actuatorThrustMFC = setpoint->thrust;
     }
     if (setpoint->mode.x == modeDisable || setpoint->mode.y == modeDisable) {
       attitudeDesired.roll = setpoint->attitude.roll;
@@ -382,7 +375,7 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
     r_yaw = radians(sensors->gyro.z);
     accelz = sensors->acc.z;
   }
-  control->thrust = actuatorThrust;
+  control->thrust = actuatorThrustMFC;
   // Some reset parameters 
   if (control->thrust == 0)
   {
@@ -411,8 +404,9 @@ void controllerOutOfTree(control_t *control, const setpoint_t *setpoint, const s
 LOG_GROUP_START(mfcLogs)
 LOG_ADD(LOG_FLOAT, thrust, &actuatorThrustMFC)
 LOG_ADD(LOG_FLOAT, d2, &mfc.prev_yddot)
-LOG_ADD(LOG_FLOAT, F, &mfc.F.v[3])
-LOG_ADD(LOG_FLOAT, u_mfc, &mfc.u_mfc)
+LOG_ADD(LOG_FLOAT, F, &mfc.F_min.v[2])
+LOG_ADD(LOG_FLOAT, B, &mfc.F_min.v[3])
+LOG_ADD(LOG_FLOAT, u, &mfc.u_mfc)
 LOG_ADD(LOG_FLOAT, u_c, &mfc.u_c)
 LOG_GROUP_STOP(mfcLogs)
 
