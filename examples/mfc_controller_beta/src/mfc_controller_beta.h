@@ -30,8 +30,9 @@
 
 typedef struct mfc_Variables_s {
     //Helper Variables
-    struct vec F;
-    struct mat33 P;
+    struct vec4 F;
+    struct vec4 F_min;
+    struct mat44 P;
     float u_mfc;
     float prev_ydot;
     float prev_yddot;
